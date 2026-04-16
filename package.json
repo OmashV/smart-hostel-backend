@@ -6,7 +6,8 @@
   "type": "commonjs",
   "scripts": {
     "dev": "nodemon server.js",
-    "start": "node server.js"
+    "start": "node server.js",
+     "build:daily-summary": "node scripts/buildDailySummary.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
