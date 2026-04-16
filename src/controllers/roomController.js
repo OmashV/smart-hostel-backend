@@ -53,6 +53,25 @@ function mapDailyRows(results) {
   }));
 }
 
+function buildDailyMatchByDate(dateString) {
+  return {
+    $match: {
+      $expr: {
+        $eq: [
+          {
+            $dateToString: {
+              format: "%Y-%m-%d",
+              date: "$captured_at",
+              timezone: TIMEZONE
+            }
+          },
+          dateString
+        ]
+      }
+    }
+  };
+}
+
 async function getLatestReading(req, res) {
   try {
     const { roomId } = req.params;
@@ -86,12 +105,244 @@ async function getOwnerKpis(req, res) {
 
     const today = results[0];
 
+    const totalEnergy = Number(((today?.total_energy_kwh) || 0).toFixed(4));
+    const wastedEnergy = Number(((today?.wasted_energy_kwh) || 0).toFixed(4));
+    const wasteRatio =
+      totalEnergy > 0 ? Number(((wastedEnergy / totalEnergy) * 100).toFixed(2)) : 0;
+
+    const latestReading = await SensorReading.findOne({ room_id: roomId }).sort({
+      captured_at: -1
+    });
+
     res.json({
       room_id: roomId,
       date: todaySriLanka,
-      total_energy_today_kwh: Number(((today?.total_energy_kwh) || 0).toFixed(4)),
-      wasted_energy_today_kwh: Number(((today?.wasted_energy_kwh) || 0).toFixed(4)),
-      critical_waste_events_today: today?.critical_waste_events || 0
+      total_energy_today_kwh: totalEnergy,
+      wasted_energy_today_kwh: wastedEnergy,
+      waste_ratio_today_percent: wasteRatio,
+      current_waste_status: latestReading?.waste_stat || "Unknown"
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
+async function getOwnerRoomComparison(req, res) {
+  try {
+    const todaySriLanka = getSriLankaDateString();
+
+    const results = await SensorReading.aggregate([
+      buildDailyMatchByDate(todaySriLanka),
+      {
+        $group: {
+          _id: "$room_id",
+          total_energy_kwh: { $sum: "$interval_energy_kwh" },
+          wasted_energy_kwh: { $sum: "$interval_wasted_energy_kwh" }
+        }
+      },
+      {
+        $project: {
+          _id: 0,
+          room_id: "$_id",
+          total_energy_kwh: { $round: ["$total_energy_kwh", 4] },
+          wasted_energy_kwh: { $round: ["$wasted_energy_kwh", 4] },
+          waste_ratio_percent: {
+            $round: [
+              {
+                $cond: [
+                  { $gt: ["$total_energy_kwh", 0] },
+                  { $multiply: [{ $divide: ["$wasted_energy_kwh", "$total_energy_kwh"] }, 100] },
+                  0
+                ]
+              },
+              2
+            ]
+          }
+        }
+      },
+      {
+        $sort: { wasted_energy_kwh: -1 }
+      }
+    ]);
+
+    res.json({
+      date: todaySriLanka,
+      rooms: results
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
+async function getOwnerAlerts(req, res) {
+  try {
+    const todaySriLanka = getSriLankaDateString();
+
+    const latestPerRoom = await SensorReading.aggregate([
+      { $sort: { room_id: 1, captured_at: -1 } },
+      {
+        $group: {
+          _id: "$room_id",
+          latest: { $first: "$$ROOT" }
+        }
+      },
+      { $replaceRoot: { newRoot: "$latest" } }
+    ]);
+
+    const todayRoomAgg = await SensorReading.aggregate([
+      buildDailyMatchByDate(todaySriLanka),
+      {
+        $group: {
+          _id: "$room_id",
+          total_energy_kwh: { $sum: "$interval_energy_kwh" },
+          wasted_energy_kwh: { $sum: "$interval_wasted_energy_kwh" }
+        }
+      }
+    ]);
+
+    const roomMap = new Map(
+      todayRoomAgg.map((r) => [
+        r._id,
+        {
+          total_energy_kwh: r.total_energy_kwh || 0,
+          wasted_energy_kwh: r.wasted_energy_kwh || 0
+        }
+      ])
+    );
+
+    const alerts = [];
+
+    for (const room of latestPerRoom) {
+      const agg = roomMap.get(room.room_id) || {
+        total_energy_kwh: 0,
+        wasted_energy_kwh: 0
+      };
+
+      const wasteRatio =
+        agg.total_energy_kwh > 0
+          ? (agg.wasted_energy_kwh / agg.total_energy_kwh) * 100
+          : 0;
+
+      if (room.waste_stat === "Critical") {
+        alerts.push({
+          type: "critical",
+          title: "Critical Energy Waste",
+          message: `Room ${room.room_id} is currently wasting energy at a critical level.`,
+          room_id: room.room_id,
+          severity: "Critical",
+          captured_at: room.captured_at
+        });
+      }
+
+      if (wasteRatio >= 40) {
+        alerts.push({
+          type: "warning",
+          title: "High Waste Ratio",
+          message: `Room ${room.room_id} has a waste ratio of ${wasteRatio.toFixed(2)}% today.`,
+          room_id: room.room_id,
+          severity: "Warning",
+          captured_at: room.captured_at
+        });
+      }
+
+      if (agg.total_energy_kwh >= 3 && agg.wasted_energy_kwh === 0) {
+        alerts.push({
+          type: "info",
+          title: "High Energy Usage",
+          message: `Room ${room.room_id} has high energy usage today.`,
+          room_id: room.room_id,
+          severity: "Info",
+          captured_at: room.captured_at
+        });
+      }
+    }
+
+    const uniqueAlerts = alerts
+      .sort((a, b) => {
+        const priority = { Critical: 3, Warning: 2, Info: 1 };
+        return priority[b.severity] - priority[a.severity];
+      })
+      .slice(0, 6);
+
+    res.json({
+      date: todaySriLanka,
+      alerts: uniqueAlerts
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
+
+async function getOwnerRoomsOverview(req, res) {
+  try {
+    const todaySriLanka = getSriLankaDateString();
+
+    const latestPerRoom = await SensorReading.aggregate([
+      { $sort: { room_id: 1, captured_at: -1 } },
+      {
+        $group: {
+          _id: "$room_id",
+          latest: { $first: "$$ROOT" }
+        }
+      },
+      { $replaceRoot: { newRoot: "$latest" } }
+    ]);
+
+    const todayAgg = await SensorReading.aggregate([
+      buildDailyMatchByDate(todaySriLanka),
+      {
+        $group: {
+          _id: "$room_id",
+          total_energy_kwh: { $sum: "$interval_energy_kwh" },
+          wasted_energy_kwh: { $sum: "$interval_wasted_energy_kwh" }
+        }
+      }
+    ]);
+
+    const aggMap = new Map(
+      todayAgg.map((item) => [
+        item._id,
+        {
+          total_energy_kwh: Number((item.total_energy_kwh || 0).toFixed(4)),
+          wasted_energy_kwh: Number((item.wasted_energy_kwh || 0).toFixed(4))
+        }
+      ])
+    );
+
+    const rooms = latestPerRoom.map((room) => {
+      const agg = aggMap.get(room.room_id) || {
+        total_energy_kwh: 0,
+        wasted_energy_kwh: 0
+      };
+
+      const wasteRatio =
+        agg.total_energy_kwh > 0
+          ? Number(((agg.wasted_energy_kwh / agg.total_energy_kwh) * 100).toFixed(2))
+          : 0;
+
+      const alertCount =
+        (room.waste_stat === "Critical" ? 1 : 0) +
+        (room.noise_stat === "Warning" || room.noise_stat === "Violation" ? 1 : 0);
+
+      return {
+        room_id: room.room_id,
+        occupancy_stat: room.occupancy_stat,
+        noise_stat: room.noise_stat,
+        waste_stat: room.waste_stat,
+        door_status: room.door_status,
+        current_amp: room.current_amp,
+        total_energy_kwh: agg.total_energy_kwh,
+        wasted_energy_kwh: agg.wasted_energy_kwh,
+        waste_ratio_percent: wasteRatio,
+        last_activity: room.captured_at,
+        alert_count: alertCount
+      };
+    });
+
+    res.json({
+      date: todaySriLanka,
+      rooms: rooms.sort((a, b) => a.room_id.localeCompare(b.room_id))
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -132,7 +383,19 @@ async function getTopWasteDays(req, res) {
       { $limit: limit }
     ]);
 
-    const days = mapDailyRows(results);
+    const days = results.map((item) => {
+      const totalEnergy = Number((item.total_energy_kwh || 0).toFixed(4));
+      const wastedEnergy = Number((item.wasted_energy_kwh || 0).toFixed(4));
+      const wasteRatio =
+        totalEnergy > 0 ? Number(((wastedEnergy / totalEnergy) * 100).toFixed(2)) : 0;
+
+      return {
+        date: item._id,
+        total_energy_kwh: totalEnergy,
+        wasted_energy_kwh: wastedEnergy,
+        waste_ratio_percent: wasteRatio
+      };
+    });
 
     res.json({
       room_id: roomId,
@@ -480,6 +743,9 @@ module.exports = {
   getDailyEnergyHistory,
   getTopWasteDays,
   getEnergyForecast,
+  getOwnerRoomComparison,
+  getOwnerRoomsOverview,
+  getOwnerAlerts,
   getWardenSummary,
   getWardenRoomsStatus,
   getWardenNoiseIssues,
