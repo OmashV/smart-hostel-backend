@@ -1,5 +1,9 @@
 const SensorReading = require("../models/SensorReading");
 const { buildForecast } = require("../services/forecastService");
+const OwnerForecast = require("../models/OwnerForecast");
+const OwnerFeatureImportance = require("../models/OwnerFeatureImportance");
+const OwnerAnomaly = require("../models/OwnerAnomaly");
+const OwnerPattern = require("../models/OwnerPattern");
 
 const TIMEZONE = "Asia/Colombo";
 
@@ -291,6 +295,51 @@ async function getWardenNoiseIssues(req, res) {
     res.status(500).json({ message: error.message });
   }
 }
+
+async function getOwnerFeatureImportance(req, res) {
+  try {
+    const items = await OwnerFeatureImportance.find().sort({ importance: -1 }).lean();
+    res.json({ items });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
+async function getOwnerAnomalies(req, res) {
+  try {
+    const items = await OwnerAnomaly.find({ is_anomaly: true })
+      .sort({ date: -1 })
+      .lean();
+
+    res.json({ items });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
+async function getOwnerPatterns(req, res) {
+  try {
+    const items = await OwnerPattern.find()
+      .sort({ date: -1 })
+      .lean();
+
+    res.json({ items });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
+async function getOwnerForecasts(req, res) {
+  try {
+    const items = await OwnerForecast.find()
+      .sort({ date: 1 })
+      .lean();
+
+    res.json({ items });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
 // ================= SECURITY =================
 
 async function getSecuritySummary(req, res) {
@@ -477,6 +526,10 @@ async function getStudentRecentAlerts(req, res) {
 module.exports = {
   getLatestReading,
   getOwnerKpis,
+  getOwnerFeatureImportance,
+  getOwnerAnomalies,
+  getOwnerPatterns,
+  getOwnerForecasts,
   getDailyEnergyHistory,
   getTopWasteDays,
   getEnergyForecast,
