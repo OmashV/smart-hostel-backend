@@ -14,12 +14,12 @@ const {
   getWardenSummary,
   getWardenRoomsStatus,
   getWardenNoiseIssues,
+  getWardenInspectionQueue,
+  getWardenNoiseTrend,
   getWardenFeatureImportance,
   getWardenAnomalies,
   getWardenPatterns,
   getWardenForecasts,
-  getWardenInspectionQueue,
-  getWardenNoiseTrend,
   getSecuritySummary,
   getSecuritySuspiciousRooms,
   getSecurityDoorEvents,
@@ -49,12 +49,12 @@ router.get("/owner/alerts", getOwnerAlerts);
 router.get("/warden/summary", getWardenSummary);
 router.get("/warden/rooms-status", getWardenRoomsStatus);
 router.get("/warden/noise-issues", getWardenNoiseIssues);
+router.get("/warden/inspection-queue", getWardenInspectionQueue);
+router.get("/warden/noise-trend", getWardenNoiseTrend);
 router.get("/warden/feature-importance", getWardenFeatureImportance);
 router.get("/warden/anomalies", getWardenAnomalies);
 router.get("/warden/patterns", getWardenPatterns);
 router.get("/warden/forecasts", getWardenForecasts);
-router.get("/warden/inspection-queue", getWardenInspectionQueue);
-router.get("/warden/noise-trend", getWardenNoiseTrend);
 
 // security
 router.get("/security/summary", getSecuritySummary);

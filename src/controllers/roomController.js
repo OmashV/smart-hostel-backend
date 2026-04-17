@@ -11,6 +11,8 @@ const WardenAnomaly = require("../models/WardenAnomaly");
 const WardenPattern = require("../models/WardenPattern");
 
 
+
+
 const TIMEZONE = "Asia/Colombo";
 
 function getSriLankaDateParts(date = new Date()) {
@@ -464,7 +466,6 @@ async function getWardenForecasts(req, res) {
     res.status(500).json({ message: error.message });
   }
 }
-
 async function getWardenInspectionQueue(req, res) {
   try {
     const latestReadings = await SensorReading.aggregate([
@@ -514,7 +515,8 @@ async function getWardenInspectionQueue(req, res) {
           sound_peak: room.sound_peak,
           sensor_faults: room.sensor_faults || {},
           inspection_reasons,
-          captured_at: room.captured_at
+          captured_at: room.captured_at,
+          needs_inspection: inspection_reasons.length > 0
         };
       })
       .filter((room) => room.inspection_reasons.length > 0);
@@ -833,6 +835,8 @@ module.exports = {
   getWardenAnomalies,
   getWardenPatterns,
   getWardenForecasts,
+  getWardenInspectionQueue,
+  getWardenNoiseTrend,
   getSecuritySummary,
   getSecuritySuspiciousRooms,
   getSecurityDoorEvents,
