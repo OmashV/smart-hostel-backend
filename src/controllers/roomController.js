@@ -465,6 +465,128 @@ async function getWardenForecasts(req, res) {
   }
 }
 
+async function getWardenInspectionQueue(req, res) {
+  try {
+    const latestReadings = await SensorReading.aggregate([
+      { $sort: { room_id: 1, captured_at: -1 } },
+      {
+        $group: {
+          _id: "$room_id",
+          latest: { $first: "$$ROOT" }
+        }
+      },
+      {
+        $replaceRoot: { newRoot: "$latest" }
+      }
+    ]);
+
+    const rooms = latestReadings
+      .map((room) => {
+        const inspection_reasons = [];
+
+        if (room.waste_stat === "Critical") {
+          inspection_reasons.push("Critical waste detected");
+        }
+
+        if (
+          room.noise_stat === "Violation" ||
+          room.noise_stat === "Warning" ||
+          room.noise_stat === "Complaint" ||
+          room.noise_stat === "Compliant"
+        ) {
+          inspection_reasons.push("Noise issue detected");
+        }
+
+        if (room.sensor_faults) {
+          if (room.sensor_faults.pir) inspection_reasons.push("PIR sensor fault");
+          if (room.sensor_faults.door) inspection_reasons.push("Door sensor fault");
+          if (room.sensor_faults.sound) inspection_reasons.push("Sound sensor fault");
+          if (room.sensor_faults.current) inspection_reasons.push("Current sensor fault");
+        }
+
+        return {
+          room_id: room.room_id,
+          occupancy_stat: room.occupancy_stat,
+          noise_stat: room.noise_stat,
+          waste_stat: room.waste_stat,
+          door_status: room.door_status,
+          current_amp: room.current_amp,
+          sound_peak: room.sound_peak,
+          sensor_faults: room.sensor_faults || {},
+          inspection_reasons,
+          captured_at: room.captured_at
+        };
+      })
+      .filter((room) => room.inspection_reasons.length > 0);
+
+    res.json({ rooms });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
+async function getWardenNoiseTrend(req, res) {
+  try {
+    const days = Number(req.query.days || 7);
+    const startDate = new Date();
+    startDate.setDate(startDate.getDate() - (days - 1));
+    startDate.setHours(0, 0, 0, 0);
+
+    const trend = await SensorReading.aggregate([
+      {
+        $match: {
+          captured_at: { $gte: startDate }
+        }
+      },
+      {
+        $group: {
+          _id: {
+            date: {
+              $dateToString: {
+                format: "%Y-%m-%d",
+                date: "$captured_at"
+              }
+            }
+          },
+          warnings: {
+            $sum: {
+              $cond: [
+                {
+                  $or: [
+                    { $eq: ["$noise_stat", "Warning"] },
+                    { $eq: ["$noise_stat", "Complaint"] },
+                    { $eq: ["$noise_stat", "Compliant"] }
+                  ]
+                },
+                1,
+                0
+              ]
+            }
+          },
+          violations: {
+            $sum: {
+              $cond: [{ $eq: ["$noise_stat", "Violation"] }, 1, 0]
+            }
+          }
+        }
+      },
+      {
+        $project: {
+          _id: 0,
+          date: "$_id.date",
+          warnings: 1,
+          violations: 1
+        }
+      },
+      { $sort: { date: 1 } }
+    ]);
+
+    res.json({ trend });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
 async function getOwnerFeatureImportance(req, res) {
   try {
     const items = await OwnerFeatureImportance.find().sort({ importance: -1 }).lean();
