@@ -2,22 +2,27 @@ const express = require("express");
 const {
   getLatestReading,
   getOwnerKpis,
+  getOwnerFeatureImportance,
+  getOwnerAnomalies,
+  getOwnerPatterns,
+  getOwnerForecasts,
+  getOwnerRoomsOverview,
+  getOwnerAlerts,
   getDailyEnergyHistory,
   getTopWasteDays,
   getEnergyForecast,
-  getOwnerRoomComparison,
-  getOwnerAlerts,
   getWardenSummary,
   getWardenRoomsStatus,
   getWardenNoiseIssues,
-  getWardenInspectionQueue,
-  getWardenNoiseTrend,
+  getWardenFeatureImportance,
+  getWardenAnomalies,
+  getWardenPatterns,
+  getWardenForecasts,
   getSecuritySummary,
   getSecuritySuspiciousRooms,
   getSecurityDoorEvents,
   getStudentOverview,
   getStudentEnergyHistory,
-  getOwnerRoomsOverview,
   getStudentRecentAlerts
 } = require("../controllers/roomController");
 
@@ -31,16 +36,21 @@ router.get("/:roomId/owner-kpis", getOwnerKpis);
 router.get("/:roomId/energy/history", getDailyEnergyHistory);
 router.get("/:roomId/energy/top-waste-days", getTopWasteDays);
 router.get("/:roomId/energy/forecast", getEnergyForecast);
-router.get("/owner/room-comparison", getOwnerRoomComparison);
-router.get("/owner/alerts", getOwnerAlerts);
+router.get("/owner/feature-importance", getOwnerFeatureImportance);
+router.get("/owner/anomalies", getOwnerAnomalies);
+router.get("/owner/patterns", getOwnerPatterns);
+router.get("/owner/forecasts", getOwnerForecasts);
 router.get("/owner/rooms-overview", getOwnerRoomsOverview);
+router.get("/owner/alerts", getOwnerAlerts);
 
 // warden
 router.get("/warden/summary", getWardenSummary);
 router.get("/warden/rooms-status", getWardenRoomsStatus);
 router.get("/warden/noise-issues", getWardenNoiseIssues);
-router.get("/warden/inspection-queue", getWardenInspectionQueue);
-router.get("/warden/noise-trend", getWardenNoiseTrend);
+router.get("/warden/feature-importance", getWardenFeatureImportance);
+router.get("/warden/anomalies", getWardenAnomalies);
+router.get("/warden/patterns", getWardenPatterns);
+router.get("/warden/forecasts", getWardenForecasts);
 
 // security
 router.get("/security/summary", getSecuritySummary);
