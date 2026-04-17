@@ -6,6 +6,8 @@ const {
   getOwnerAnomalies,
   getOwnerPatterns,
   getOwnerForecasts,
+  getOwnerRoomsOverview,
+  getOwnerAlerts,
   getDailyEnergyHistory,
   getTopWasteDays,
   getEnergyForecast,
@@ -34,6 +36,8 @@ router.get("/owner/feature-importance", getOwnerFeatureImportance);
 router.get("/owner/anomalies", getOwnerAnomalies);
 router.get("/owner/patterns", getOwnerPatterns);
 router.get("/owner/forecasts", getOwnerForecasts);
+router.get("/owner/rooms-overview", getOwnerRoomsOverview);
+router.get("/owner/alerts", getOwnerAlerts);
 
 // warden
 router.get("/warden/summary", getWardenSummary);

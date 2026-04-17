@@ -2,7 +2,7 @@ const mongoose = require("mongoose");
 require("dotenv").config();
 
 const SensorReading = require("../src/models/SensorReading");
-const DailyRoomSummary = require("../src/models/DailyRoomSummary");
+const HourlyRoomSummary = require("../src/models/HourlyRoomSummary");
 
 const TIMEZONE = "Asia/Colombo";
 
@@ -24,6 +24,12 @@ async function run() {
             date: {
               $dateToString: {
                 format: "%Y-%m-%d",
+                date: "$captured_at",
+                timezone: TIMEZONE
+              }
+            },
+            hour: {
+              $hour: {
                 date: "$captured_at",
                 timezone: TIMEZONE
               }
@@ -53,27 +59,24 @@ async function run() {
       }
     ]);
 
-    console.log("Aggregated daily groups found:", results.length);
-
-    if (results.length > 0) {
-      console.log("First aggregated item:");
-      console.log(JSON.stringify(results[0], null, 2));
-    }
+    console.log("Aggregated hourly groups found:", results.length);
 
     for (const item of results) {
       const total = item.total_energy_kwh || 0;
       const wasted = item.wasted_energy_kwh || 0;
       const wasteRatio = total > 0 ? (wasted / total) * 100 : 0;
 
-      await DailyRoomSummary.updateOne(
+      await HourlyRoomSummary.updateOne(
         {
           room_id: item._id.room_id,
-          date: item._id.date
+          date: item._id.date,
+          hour: item._id.hour
         },
         {
           $set: {
             room_id: item._id.room_id,
             date: item._id.date,
+            hour: item._id.hour,
             total_energy_kwh: Number(total.toFixed(4)),
             wasted_energy_kwh: Number(wasted.toFixed(4)),
             waste_ratio_percent: Number(wasteRatio.toFixed(2)),
@@ -89,13 +92,13 @@ async function run() {
       );
     }
 
-    const totalSummaryDocs = await DailyRoomSummary.countDocuments();
-    console.log("daily_room_summary count:", totalSummaryDocs);
+    const totalSummaryDocs = await HourlyRoomSummary.countDocuments();
+    console.log("hourly_room_summary count:", totalSummaryDocs);
 
-    console.log("Daily summary build complete.");
+    console.log("Hourly summary build complete.");
     await mongoose.disconnect();
   } catch (err) {
-    console.error("Error while building daily summary:");
+    console.error("Error while building hourly summary:");
     console.error(err);
     process.exit(1);
   }
