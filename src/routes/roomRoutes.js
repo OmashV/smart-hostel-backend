@@ -11,14 +11,19 @@ const {
   getDailyEnergyHistory,
   getTopWasteDays,
   getEnergyForecast,
+  getOwnerRoomComparison,
+  getOwnerAlerts,
   getWardenSummary,
   getWardenRoomsStatus,
   getWardenNoiseIssues,
+  getWardenInspectionQueue,
+  getWardenNoiseTrend,
   getSecuritySummary,
   getSecuritySuspiciousRooms,
   getSecurityDoorEvents,
   getStudentOverview,
   getStudentEnergyHistory,
+  getOwnerRoomsOverview,
   getStudentRecentAlerts
 } = require("../controllers/roomController");
 
@@ -32,17 +37,16 @@ router.get("/:roomId/owner-kpis", getOwnerKpis);
 router.get("/:roomId/energy/history", getDailyEnergyHistory);
 router.get("/:roomId/energy/top-waste-days", getTopWasteDays);
 router.get("/:roomId/energy/forecast", getEnergyForecast);
-router.get("/owner/feature-importance", getOwnerFeatureImportance);
-router.get("/owner/anomalies", getOwnerAnomalies);
-router.get("/owner/patterns", getOwnerPatterns);
-router.get("/owner/forecasts", getOwnerForecasts);
-router.get("/owner/rooms-overview", getOwnerRoomsOverview);
+router.get("/owner/room-comparison", getOwnerRoomComparison);
 router.get("/owner/alerts", getOwnerAlerts);
+router.get("/owner/rooms-overview", getOwnerRoomsOverview);
 
 // warden
 router.get("/warden/summary", getWardenSummary);
 router.get("/warden/rooms-status", getWardenRoomsStatus);
 router.get("/warden/noise-issues", getWardenNoiseIssues);
+router.get("/warden/inspection-queue", getWardenInspectionQueue);
+router.get("/warden/noise-trend", getWardenNoiseTrend);
 
 // security
 router.get("/security/summary", getSecuritySummary);
