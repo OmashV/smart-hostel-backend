@@ -1,5 +1,11 @@
 const SensorReading = require("../models/SensorReading");
 const { buildForecast } = require("../services/forecastService");
+const OwnerForecast = require("../models/OwnerForecast");
+const OwnerFeatureImportance = require("../models/OwnerFeatureImportance");
+const OwnerAnomaly = require("../models/OwnerAnomaly");
+const OwnerPattern = require("../models/OwnerPattern");
+const DailyRoomSummary = require("../models/DailyRoomSummary");
+
 
 const TIMEZONE = "Asia/Colombo";
 
@@ -165,18 +171,94 @@ async function getLatestReading(req, res) {
 
 // ================= OWNER =================
 
+async function getOwnerRoomsOverview(req, res) {
+  try {
+    const latestPerRoom = await SensorReading.aggregate([
+      { $sort: { captured_at: -1 } },
+      {
+        $group: {
+          _id: "$room_id",
+          latest: { $first: "$$ROOT" }
+        }
+      }
+    ]);
+
+    const today = new Date();
+    const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(
+      today.getDate()
+    ).padStart(2, "0")}`;
+
+    const summaries = await DailyRoomSummary.find({ date: todayKey }).lean();
+    const summaryMap = summaries.reduce((acc, item) => {
+      acc[item.room_id] = item;
+      return acc;
+    }, {});
+
+    const rooms = latestPerRoom.map(({ latest }) => {
+      const summary = summaryMap[latest.room_id] || {};
+
+      const totalEnergy = Number(summary.total_energy_kwh || 0);
+      const wastedEnergy = Number(summary.wasted_energy_kwh || 0);
+      const wasteRatio =
+        summary.waste_ratio_percent !== undefined && summary.waste_ratio_percent !== null
+          ? Number(summary.waste_ratio_percent)
+          : totalEnergy > 0
+          ? Number(((wastedEnergy / totalEnergy) * 100).toFixed(2))
+          : 0;
+
+      const alertCount =
+        (latest.waste_stat === "Critical" ? 1 : 0) +
+        (latest.noise_stat === "Warning" || latest.noise_stat === "Violation" ? 1 : 0);
+
+      return {
+        room_id: latest.room_id,
+        occupancy_stat: latest.occupancy_stat || "Unknown",
+        noise_stat: latest.noise_stat || "Compliant",
+        waste_stat: latest.waste_stat || "Normal",
+        total_energy_kwh: totalEnergy,
+        wasted_energy_kwh: wastedEnergy,
+        waste_ratio_percent: wasteRatio,
+        last_activity: latest.captured_at,
+        alert_count: alertCount
+      };
+    });
+
+    res.json({ rooms });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
 async function getOwnerKpis(req, res) {
   try {
     const { roomId } = req.params;
-    const todaySriLanka = getSriLankaDateString();
 
-    const results = await SensorReading.aggregate([
-      { $match: { room_id: roomId } },
-      buildDailyGroupStage(),
-      { $match: { _id: todaySriLanka } }
-    ]);
+    const today = new Date();
+    const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(
+      today.getDate()
+    ).padStart(2, "0")}`;
 
-    const today = results[0];
+    const summary = await DailyRoomSummary.findOne({
+      room_id: roomId,
+      date: todayKey
+    }).lean();
+
+    const latest = await SensorReading.findOne({ room_id: roomId })
+      .sort({ captured_at: -1 })
+      .lean();
+
+    const totalEnergy = Number(summary?.total_energy_kwh || 0);
+    const wastedEnergy = Number(summary?.wasted_energy_kwh || 0);
+    const wasteRatio =
+      summary?.waste_ratio_percent !== undefined && summary?.waste_ratio_percent !== null
+        ? Number(summary.waste_ratio_percent)
+        : totalEnergy > 0
+        ? Number(((wastedEnergy / totalEnergy) * 100).toFixed(2))
+        : 0;
+
+    const currentWasteStatus =
+      latest?.waste_stat ||
+      (wasteRatio >= 30 ? "Critical" : wasteRatio >= 15 ? "Warning" : "Normal");
 
     const totalEnergy = Number((today?.total_energy_kwh || 0).toFixed(4));
     const wastedEnergy = Number((today?.wasted_energy_kwh || 0).toFixed(4));
@@ -493,6 +575,48 @@ async function getEnergyForecast(req, res) {
       history,
       forecast
     });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
+async function getOwnerAlerts(req, res) {
+  try {
+    const latestPerRoom = await SensorReading.aggregate([
+      { $sort: { captured_at: -1 } },
+      {
+        $group: {
+          _id: "$room_id",
+          latest: { $first: "$$ROOT" }
+        }
+      }
+    ]);
+
+    const alerts = [];
+
+    latestPerRoom.forEach(({ latest }) => {
+      if (latest.waste_stat === "Critical") {
+        alerts.push({
+          room_id: latest.room_id,
+          severity: "Critical",
+          title: "High Energy Waste",
+          message: "Room is showing critical waste behavior.",
+          captured_at: latest.captured_at
+        });
+      }
+
+      if (latest.noise_stat === "Warning" || latest.noise_stat === "Violation") {
+        alerts.push({
+          room_id: latest.room_id,
+          severity: "Warning",
+          title: "Noise Issue",
+          message: "Room has abnormal or non-compliant noise behavior.",
+          captured_at: latest.captured_at
+        });
+      }
+    });
+
+    res.json({ alerts });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -883,6 +1007,12 @@ async function getStudentRecentAlerts(req, res) {
 module.exports = {
   getLatestReading,
   getOwnerKpis,
+  getOwnerFeatureImportance,
+  getOwnerAnomalies,
+  getOwnerPatterns,
+  getOwnerForecasts,
+  getOwnerRoomsOverview,
+  getOwnerAlerts,
   getDailyEnergyHistory,
   getTopWasteDays,
   getEnergyForecast,

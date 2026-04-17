@@ -2,6 +2,12 @@ const express = require("express");
 const {
   getLatestReading,
   getOwnerKpis,
+  getOwnerFeatureImportance,
+  getOwnerAnomalies,
+  getOwnerPatterns,
+  getOwnerForecasts,
+  getOwnerRoomsOverview,
+  getOwnerAlerts,
   getDailyEnergyHistory,
   getTopWasteDays,
   getEnergyForecast,
