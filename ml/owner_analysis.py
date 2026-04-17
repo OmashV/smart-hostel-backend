@@ -131,37 +131,78 @@ if len(anomaly_features) >= 5:
     current_mean = df["avg_current"].mean()
     current_std = df["avg_current"].std(ddof=0) or 1e-6
 
-    for _, row in df.iterrows():
-        if row["anomaly_flag"] == -1:
-            reason = "abnormal energy/current pattern"
+for _, row in df.iterrows():
+    if row["anomaly_flag"] == -1:
+        reason = "abnormal energy/current pattern"
 
-            if row["wasted_energy_kwh"] > waste_mean + waste_std:
-                reason = "unusually high wasted energy"
-            elif row["total_energy_kwh"] > energy_mean + energy_std:
-                reason = "unusually high total energy usage"
-            elif row["avg_current"] > current_mean + current_std:
-                reason = "unusually high current draw"
-            elif row["avg_current"] < max(0, current_mean - current_std):
-                reason = "unusually low current draw"
+        if row["wasted_energy_kwh"] > waste_mean + waste_std:
+            reason = "unusually high wasted energy"
+        elif row["total_energy_kwh"] > energy_mean + energy_std:
+            reason = "unusually high total energy usage"
+        elif row["avg_current"] > current_mean + current_std:
+            reason = "unusually high current draw"
+        elif row["avg_current"] < max(0, current_mean - current_std):
+            reason = "unusually low current draw"
 
-            doc = {
-                "room_id": row["room_id"],
-                "date": row["date"].strftime("%Y-%m-%d"),
-                "status": "Abnormal",
-                "reason": reason,
-                "total_energy_kwh": round(float(row["total_energy_kwh"]), 4),
-                "wasted_energy_kwh": round(float(row["wasted_energy_kwh"]), 4),
-                "waste_ratio_percent": round(float(row["waste_ratio_percent"]), 2),
-                "avg_current": round(float(row["avg_current"]), 4),
-                "anomaly_score": round(float(row["anomaly_score"]), 4)
-            }
+        doc = {
+            "room_id": row["room_id"],
+            "date": row["date"].strftime("%Y-%m-%d"),
+            "status": "Abnormal",
+            "reason": reason,
+            "total_energy_kwh": round(float(row["total_energy_kwh"]), 4),
+            "wasted_energy_kwh": round(float(row["wasted_energy_kwh"]), 4),
+            "waste_ratio_percent": round(float(row["waste_ratio_percent"]), 2),
+            "avg_current": round(float(row["avg_current"]), 4),
+            "anomaly_score": round(float(row["anomaly_score"]), 4)
+        }
 
-            anomaly_docs.append(doc)
-            db.owner_anomalies.update_one(
-                {"room_id": doc["room_id"], "date": doc["date"]},
-                {"$set": doc},
-                upsert=True
-            )
+        anomaly_docs.append(doc)
+        db.owner_anomalies.update_one(
+            {"room_id": doc["room_id"], "date": doc["date"]},
+            {"$set": doc},
+            upsert=True
+        )
+
+        alert_doc = {
+            "room_id": doc["room_id"],
+            "date": doc["date"],
+            "severity": "Critical" if doc["reason"] in [
+                "unusually high wasted energy",
+                "unusually high total energy usage"
+            ] else "Warning",
+            "title": (
+                "High Wasted Energy" if doc["reason"] == "unusually high wasted energy"
+                else "High Energy Usage" if doc["reason"] == "unusually high total energy usage"
+                else "High Current Draw" if doc["reason"] == "unusually high current draw"
+                else "Low Current Draw" if doc["reason"] == "unusually low current draw"
+                else "Abnormal Energy Pattern"
+            ),
+            "message": (
+                "Room shows unusually high wasted energy compared to learned normal behavior."
+                if doc["reason"] == "unusually high wasted energy"
+                else "Room shows unusually high total energy usage compared to learned normal behavior."
+                if doc["reason"] == "unusually high total energy usage"
+                else "Room shows unusually high current draw compared to learned normal behavior."
+                if doc["reason"] == "unusually high current draw"
+                else "Room shows unusually low current draw compared to learned normal behavior."
+                if doc["reason"] == "unusually low current draw"
+                else "Room shows abnormal energy/current behavior."
+            ),
+            "reason": doc["reason"],
+            "source": "anomaly",
+            "status": "active",
+            "is_deleted": False
+        }
+
+        db.owner_alerts.update_one(
+            {
+                "room_id": alert_doc["room_id"],
+                "date": alert_doc["date"],
+                "title": alert_doc["title"]
+            },
+            {"$set": alert_doc},
+            upsert=True
+        )
 
     print("Anomaly docs processed:", len(anomaly_docs))
 else:

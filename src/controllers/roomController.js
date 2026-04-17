@@ -5,6 +5,7 @@ const OwnerFeatureImportance = require("../models/OwnerFeatureImportance");
 const OwnerAnomaly = require("../models/OwnerAnomaly");
 const OwnerPattern = require("../models/OwnerPattern");
 const DailyRoomSummary = require("../models/DailyRoomSummary");
+const OwnerAlert = require("../models/OwnerAlert");
 
 
 const TIMEZONE = "Asia/Colombo";
@@ -260,39 +261,20 @@ async function getEnergyForecast(req, res) {
 
 async function getOwnerAlerts(req, res) {
   try {
-    const latestPerRoom = await SensorReading.aggregate([
-      { $sort: { captured_at: -1 } },
-      {
-        $group: {
-          _id: "$room_id",
-          latest: { $first: "$$ROOT" }
-        }
-      }
-    ]);
+    const { roomId } = req.query;
 
-    const alerts = [];
+    const query = {
+      is_deleted: false,
+      status: "active"
+    };
 
-    latestPerRoom.forEach(({ latest }) => {
-      if (latest.waste_stat === "Critical") {
-        alerts.push({
-          room_id: latest.room_id,
-          severity: "Critical",
-          title: "High Energy Waste",
-          message: "Room is showing critical waste behavior.",
-          captured_at: latest.captured_at
-        });
-      }
+    if (roomId) {
+      query.room_id = roomId;
+    }
 
-      if (latest.noise_stat === "Warning" || latest.noise_stat === "Violation") {
-        alerts.push({
-          room_id: latest.room_id,
-          severity: "Warning",
-          title: "Noise Issue",
-          message: "Room has abnormal or non-compliant noise behavior.",
-          captured_at: latest.captured_at
-        });
-      }
-    });
+    const alerts = await OwnerAlert.find(query)
+      .sort({ date: -1, createdAt: -1 })
+      .lean();
 
     res.json({ alerts });
   } catch (error) {
@@ -300,6 +282,97 @@ async function getOwnerAlerts(req, res) {
   }
 }
 
+async function deleteOwnerAlert(req, res) {
+  try {
+    const { alertId } = req.params;
+
+    const updated = await OwnerAlert.findByIdAndUpdate(
+      alertId,
+      { $set: { is_deleted: true } },
+      { new: true }
+    );
+
+    if (!updated) {
+      return res.status(404).json({ message: "Alert not found" });
+    }
+
+    res.json({ message: "Alert deleted successfully" });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
+async function resolveOwnerAlert(req, res) {
+  try {
+    const { alertId } = req.params;
+
+    const updated = await OwnerAlert.findByIdAndUpdate(
+      alertId,
+      { $set: { status: "resolved" } },
+      { new: true }
+    );
+
+    if (!updated) {
+      return res.status(404).json({ message: "Alert not found" });
+    }
+
+    res.json({ message: "Alert resolved successfully" });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
+async function getOwnerFeatureImportance(req, res) {
+  try {
+    const items = await OwnerFeatureImportance.find().sort({ importance: -1 }).lean();
+    res.json({ items });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
+async function getOwnerAnomalies(req, res) {
+  try {
+    const { roomId } = req.query;
+
+    const query = {};
+    if (roomId) {
+      query.room_id = roomId;
+    }
+
+    const items = await OwnerAnomaly.find(query)
+      .sort({ date: -1 })
+      .lean();
+
+    res.json({ items });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
+async function getOwnerPatterns(req, res) {
+  try {
+    const items = await OwnerPattern.find()
+      .sort({ date: -1 })
+      .lean();
+
+    res.json({ items });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
+async function getOwnerForecasts(req, res) {
+  try {
+    const items = await OwnerForecast.find()
+      .sort({ date: 1 })
+      .lean();
+
+    res.json({ items });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
 // ================= WARDEN =================
 
 async function getWardenSummary(req, res) {
@@ -416,57 +489,7 @@ async function getWardenNoiseIssues(req, res) {
   }
 }
 
-async function getOwnerFeatureImportance(req, res) {
-  try {
-    const items = await OwnerFeatureImportance.find().sort({ importance: -1 }).lean();
-    res.json({ items });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
-}
 
-async function getOwnerAnomalies(req, res) {
-  try {
-    const { roomId } = req.query;
-
-    const query = {};
-    if (roomId) {
-      query.room_id = roomId;
-    }
-
-    const items = await OwnerAnomaly.find(query)
-      .sort({ date: -1 })
-      .lean();
-
-    res.json({ items });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
-}
-
-async function getOwnerPatterns(req, res) {
-  try {
-    const items = await OwnerPattern.find()
-      .sort({ date: -1 })
-      .lean();
-
-    res.json({ items });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
-}
-
-async function getOwnerForecasts(req, res) {
-  try {
-    const items = await OwnerForecast.find()
-      .sort({ date: 1 })
-      .lean();
-
-    res.json({ items });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
-}
 // ================= SECURITY =================
 
 async function getSecuritySummary(req, res) {
@@ -659,6 +682,8 @@ module.exports = {
   getOwnerForecasts,
   getOwnerRoomsOverview,
   getOwnerAlerts,
+  deleteOwnerAlert,
+  resolveOwnerAlert,
   getDailyEnergyHistory,
   getTopWasteDays,
   getEnergyForecast,
