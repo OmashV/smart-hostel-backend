@@ -111,8 +111,7 @@ anomaly_features = df[
         "total_energy_kwh",
         "wasted_energy_kwh",
         "waste_ratio_percent",
-        "avg_current",
-        "door_open_count"
+        "avg_current"
     ]
 ].copy()
 
@@ -123,17 +122,40 @@ if len(anomaly_features) >= 5:
     df["anomaly_flag"] = iso.fit_predict(anomaly_features)
     df["anomaly_score"] = iso.decision_function(anomaly_features)
 
+    energy_mean = df["total_energy_kwh"].mean()
+    energy_std = df["total_energy_kwh"].std(ddof=0) or 1e-6
+
+    waste_mean = df["wasted_energy_kwh"].mean()
+    waste_std = df["wasted_energy_kwh"].std(ddof=0) or 1e-6
+
+    current_mean = df["avg_current"].mean()
+    current_std = df["avg_current"].std(ddof=0) or 1e-6
+
     for _, row in df.iterrows():
         if row["anomaly_flag"] == -1:
+            reason = "abnormal energy/current pattern"
+
+            if row["wasted_energy_kwh"] > waste_mean + waste_std:
+                reason = "unusually high wasted energy"
+            elif row["total_energy_kwh"] > energy_mean + energy_std:
+                reason = "unusually high total energy usage"
+            elif row["avg_current"] > current_mean + current_std:
+                reason = "unusually high current draw"
+            elif row["avg_current"] < max(0, current_mean - current_std):
+                reason = "unusually low current draw"
+
             doc = {
                 "room_id": row["room_id"],
                 "date": row["date"].strftime("%Y-%m-%d"),
                 "status": "Abnormal",
-                "reason": "Unusually high waste or abnormal room usage compared to learned pattern",
+                "reason": reason,
                 "total_energy_kwh": round(float(row["total_energy_kwh"]), 4),
                 "wasted_energy_kwh": round(float(row["wasted_energy_kwh"]), 4),
+                "waste_ratio_percent": round(float(row["waste_ratio_percent"]), 2),
+                "avg_current": round(float(row["avg_current"]), 4),
                 "anomaly_score": round(float(row["anomaly_score"]), 4)
             }
+
             anomaly_docs.append(doc)
             db.owner_anomalies.update_one(
                 {"room_id": doc["room_id"], "date": doc["date"]},
