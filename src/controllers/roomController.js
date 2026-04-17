@@ -476,7 +476,14 @@ async function getOwnerFeatureImportance(req, res) {
 
 async function getOwnerAnomalies(req, res) {
   try {
-    const items = await OwnerAnomaly.find({ is_anomaly: true })
+    const { roomId } = req.query;
+
+    const query = {};
+    if (roomId) {
+      query.room_id = roomId;
+    }
+
+    const items = await OwnerAnomaly.find(query)
       .sort({ date: -1 })
       .lean();
 
