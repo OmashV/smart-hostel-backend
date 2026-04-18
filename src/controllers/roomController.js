@@ -6,6 +6,10 @@ const OwnerPattern = require("../models/OwnerPattern");
 const DailyRoomSummary = require("../models/DailyRoomSummary");
 const OwnerAlert = require("../models/OwnerAlert");
 const OwnerWeekdayPattern = require("../models/OwnerWeekdayPattern");
+const WardenForecast = require("../models/WardenForecast");
+const WardenFeatureImportance = require("../models/WardenFeatureImportance");
+const WardenAnomaly = require("../models/WardenAnomaly");
+const WardenPattern = require("../models/WardenPattern");
 
 
 const TIMEZONE = "Asia/Colombo";
@@ -492,6 +496,63 @@ async function getWardenNoiseIssues(req, res) {
   }
 }
 
+async function getWardenFeatureImportance(req, res) {
+  try {
+    const items = await WardenFeatureImportance.find().sort({ importance: -1 }).lean();
+    res.json({ items });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
+async function getWardenAnomalies(req, res) {
+  try {
+    const items = await WardenAnomaly.find()
+      .sort({ date: -1 })
+      .lean();
+
+    res.json({ items });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
+async function getWardenPatterns(req, res) {
+  try {
+    const items = await WardenPattern.find()
+      .sort({ date: -1 })
+      .lean();
+
+    res.json({ items });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
+async function getWardenForecasts(req, res) {
+  try {
+    const items = await WardenForecast.find()
+      .sort({ date: 1 })
+      .lean();
+
+    res.json({ items });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
+async function getOwnerFeatureImportance(req, res) {
+  try {
+    const items = await OwnerFeatureImportance.find().sort({ importance: -1 }).lean();
+    res.json({ items });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
+async function getOwnerAnomalies(req, res) {
+  try {
+    const { roomId } = req.query;
 
 // ================= SECURITY =================
 
@@ -692,6 +753,10 @@ module.exports = {
   getWardenSummary,
   getWardenRoomsStatus,
   getWardenNoiseIssues,
+  getWardenFeatureImportance,
+  getWardenAnomalies,
+  getWardenPatterns,
+  getWardenForecasts,
   getSecuritySummary,
   getSecuritySuspiciousRooms,
   getSecurityDoorEvents,
