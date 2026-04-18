@@ -1,11 +1,11 @@
 const SensorReading = require("../models/SensorReading");
 const { buildForecast } = require("../services/forecastService");
 const OwnerForecast = require("../models/OwnerForecast");
-const OwnerFeatureImportance = require("../models/OwnerFeatureImportance");
 const OwnerAnomaly = require("../models/OwnerAnomaly");
 const OwnerPattern = require("../models/OwnerPattern");
 const DailyRoomSummary = require("../models/DailyRoomSummary");
 const OwnerAlert = require("../models/OwnerAlert");
+const OwnerWeekdayPattern = require("../models/OwnerWeekdayPattern");
 
 
 const TIMEZONE = "Asia/Colombo";
@@ -79,6 +79,39 @@ async function getLatestReading(req, res) {
 }
 
 // ================= OWNER =================
+
+async function getOwnerWeekdayPatterns(req, res) {
+  try {
+    const { roomId } = req.query;
+
+    const query = {};
+    if (roomId) {
+      query.room_id = roomId;
+    }
+
+    const weekdayOrder = {
+      Monday: 1,
+      Tuesday: 2,
+      Wednesday: 3,
+      Thursday: 4,
+      Friday: 5,
+      Saturday: 6,
+      Sunday: 7
+    };
+
+    const items = await OwnerWeekdayPattern.find(query).lean();
+
+    items.sort((a, b) => {
+      const dayA = weekdayOrder[a.weekday_name] || 99;
+      const dayB = weekdayOrder[b.weekday_name] || 99;
+      return dayA - dayB;
+    });
+
+    res.json({ items });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
 
 async function getOwnerRoomsOverview(req, res) {
   try {
@@ -203,28 +236,6 @@ async function getDailyEnergyHistory(req, res) {
   }
 }
 
-async function getTopWasteDays(req, res) {
-  try {
-    const { roomId } = req.params;
-    const limit = Number(req.query.limit || 5);
-
-    const results = await SensorReading.aggregate([
-      { $match: { room_id: roomId } },
-      buildDailyGroupStage(),
-      { $sort: { wasted_energy_kwh: -1 } },
-      { $limit: limit }
-    ]);
-
-    const days = mapDailyRows(results);
-
-    res.json({
-      room_id: roomId,
-      days
-    });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
-}
 
 async function getEnergyForecast(req, res) {
   try {
@@ -322,14 +333,6 @@ async function resolveOwnerAlert(req, res) {
   }
 }
 
-async function getOwnerFeatureImportance(req, res) {
-  try {
-    const items = await OwnerFeatureImportance.find().sort({ importance: -1 }).lean();
-    res.json({ items });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
-}
 
 async function getOwnerAnomalies(req, res) {
   try {
@@ -676,7 +679,7 @@ async function getStudentRecentAlerts(req, res) {
 module.exports = {
   getLatestReading,
   getOwnerKpis,
-  getOwnerFeatureImportance,
+  getOwnerWeekdayPatterns,
   getOwnerAnomalies,
   getOwnerPatterns,
   getOwnerForecasts,
@@ -685,7 +688,6 @@ module.exports = {
   deleteOwnerAlert,
   resolveOwnerAlert,
   getDailyEnergyHistory,
-  getTopWasteDays,
   getEnergyForecast,
   getWardenSummary,
   getWardenRoomsStatus,
