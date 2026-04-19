@@ -1,5 +1,16 @@
 const SensorReading = require("../models/SensorReading");
 const { buildForecast } = require("../services/forecastService");
+const OwnerForecast = require("../models/OwnerForecast");
+const OwnerAnomaly = require("../models/OwnerAnomaly");
+const OwnerPattern = require("../models/OwnerPattern");
+const DailyRoomSummary = require("../models/DailyRoomSummary");
+const OwnerAlert = require("../models/OwnerAlert");
+const OwnerWeekdayPattern = require("../models/OwnerWeekdayPattern");
+const WardenForecast = require("../models/WardenForecast");
+const WardenFeatureImportance = require("../models/WardenFeatureImportance");
+const WardenAnomaly = require("../models/WardenAnomaly");
+const WardenPattern = require("../models/WardenPattern");
+
 
 const TIMEZONE = "Asia/Colombo";
 
@@ -53,98 +64,6 @@ function mapDailyRows(results) {
   }));
 }
 
-function buildDailyMatchByDate(dateString) {
-  return {
-    $match: {
-      $expr: {
-        $eq: [
-          {
-            $dateToString: {
-              format: "%Y-%m-%d",
-              date: "$captured_at",
-              timezone: TIMEZONE
-            }
-          },
-          dateString
-        ]
-      }
-    }
-  };
-}
-
-function getLatestPerRoomPipeline() {
-  return [
-    { $sort: { room_id: 1, captured_at: -1 } },
-    {
-      $group: {
-        _id: "$room_id",
-        latest: { $first: "$$ROOT" }
-      }
-    },
-    { $replaceRoot: { newRoot: "$latest" } }
-  ];
-}
-
-function getSensorFaultFlags(room) {
-  return {
-    pir: Boolean(room?.sensor_faults?.pir),
-    door: Boolean(room?.sensor_faults?.door),
-    sound: Boolean(room?.sensor_faults?.sound),
-    current: Boolean(room?.sensor_faults?.current)
-  };
-}
-
-function hasAnySensorFault(room) {
-  const faults = getSensorFaultFlags(room);
-  return faults.pir || faults.door || faults.sound || faults.current;
-}
-
-function isStaleReading(capturedAt, staleMinutes = 10) {
-  if (!capturedAt) return true;
-  const diffMs = Date.now() - new Date(capturedAt).getTime();
-  return diffMs > staleMinutes * 60 * 1000;
-}
-
-function getInspectionReasons(room) {
-  const reasons = [];
-
-  if (room.waste_stat === "Critical") reasons.push("Critical waste");
-  if (room.noise_stat === "Violation") reasons.push("Noise violation");
-  if (room.noise_stat === "Warning") reasons.push("Noise warning");
-
-  const faults = getSensorFaultFlags(room);
-  if (faults.pir) reasons.push("PIR sensor fault");
-  if (faults.door) reasons.push("Door sensor fault");
-  if (faults.sound) reasons.push("Sound sensor fault");
-  if (faults.current) reasons.push("Current sensor fault");
-
-  if (isStaleReading(room.captured_at)) reasons.push("Stale data");
-
-  return reasons;
-}
-
-function toWardenRoomStatus(room) {
-  const sensor_faults = getSensorFaultFlags(room);
-  const stale_data = isStaleReading(room.captured_at);
-  const inspection_reasons = getInspectionReasons(room);
-
-  return {
-    room_id: room.room_id,
-    occupancy_stat: room.occupancy_stat || "Unknown",
-    noise_stat: room.noise_stat || "Unknown",
-    waste_stat: room.waste_stat || "Unknown",
-    door_status: room.door_status || "Unknown",
-    current_amp: Number((room.current_amp || 0).toFixed(2)),
-    sound_peak: Number((room.sound_peak || 0).toFixed(2)),
-    sensor_health: room.sensor_health || {},
-    sensor_faults,
-    stale_data,
-    needs_inspection: inspection_reasons.length > 0,
-    inspection_reasons,
-    captured_at: room.captured_at
-  };
-}
-
 async function getLatestReading(req, res) {
   try {
     const { roomId } = req.params;
@@ -165,177 +84,95 @@ async function getLatestReading(req, res) {
 
 // ================= OWNER =================
 
-async function getOwnerKpis(req, res) {
+async function getOwnerWeekdayPatterns(req, res) {
   try {
-    const { roomId } = req.params;
-    const todaySriLanka = getSriLankaDateString();
+    const { roomId } = req.query;
 
-    const results = await SensorReading.aggregate([
-      { $match: { room_id: roomId } },
-      buildDailyGroupStage(),
-      { $match: { _id: todaySriLanka } }
-    ]);
+    const query = {};
+    if (roomId) {
+      query.room_id = roomId;
+    }
 
-    const today = results[0];
+    const weekdayOrder = {
+      Monday: 1,
+      Tuesday: 2,
+      Wednesday: 3,
+      Thursday: 4,
+      Friday: 5,
+      Saturday: 6,
+      Sunday: 7
+    };
 
-    const totalEnergy = Number((today?.total_energy_kwh || 0).toFixed(4));
-    const wastedEnergy = Number((today?.wasted_energy_kwh || 0).toFixed(4));
-    const wasteRatio =
-      totalEnergy > 0 ? Number(((wastedEnergy / totalEnergy) * 100).toFixed(2)) : 0;
+    const items = await OwnerWeekdayPattern.find(query).lean();
 
-    const latestReading = await SensorReading.findOne({ room_id: roomId }).sort({
-      captured_at: -1
+    items.sort((a, b) => {
+      const dayA = weekdayOrder[a.weekday_name] || 99;
+      const dayB = weekdayOrder[b.weekday_name] || 99;
+      return dayA - dayB;
     });
 
-    res.json({
-      room_id: roomId,
-      date: todaySriLanka,
-      total_energy_today_kwh: totalEnergy,
-      wasted_energy_today_kwh: wastedEnergy,
-      waste_ratio_today_percent: wasteRatio,
-      current_waste_status: latestReading?.waste_stat || "Unknown"
-    });
+    res.json({ items });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 }
 
-async function getOwnerRoomComparison(req, res) {
+async function getOwnerKpis(req, res) {
   try {
-    const todaySriLanka = getSriLankaDateString();
+    const { roomId } = req.params;
 
-    const results = await SensorReading.aggregate([
-      buildDailyMatchByDate(todaySriLanka),
+    const now = new Date();
+
+    const startOfDay = new Date(now);
+    startOfDay.setHours(0, 0, 0, 0);
+
+    const endOfDay = new Date(now);
+    endOfDay.setHours(23, 59, 59, 999);
+
+    const todayAgg = await SensorReading.aggregate([
       {
-        $group: {
-          _id: "$room_id",
-          total_energy_kwh: { $sum: "$interval_energy_kwh" },
-          wasted_energy_kwh: { $sum: "$interval_wasted_energy_kwh" }
-        }
-      },
-      {
-        $project: {
-          _id: 0,
-          room_id: "$_id",
-          total_energy_kwh: { $round: ["$total_energy_kwh", 4] },
-          wasted_energy_kwh: { $round: ["$wasted_energy_kwh", 4] },
-          waste_ratio_percent: {
-            $round: [
-              {
-                $cond: [
-                  { $gt: ["$total_energy_kwh", 0] },
-                  {
-                    $multiply: [
-                      { $divide: ["$wasted_energy_kwh", "$total_energy_kwh"] },
-                      100
-                    ]
-                  },
-                  0
-                ]
-              },
-              2
-            ]
+        $match: {
+          room_id: roomId,
+          captured_at: {
+            $gte: startOfDay,
+            $lte: endOfDay
           }
         }
       },
       {
-        $sort: { wasted_energy_kwh: -1 }
-      }
-    ]);
-
-    res.json({
-      date: todaySriLanka,
-      rooms: results
-    });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
-}
-
-async function getOwnerAlerts(req, res) {
-  try {
-    const todaySriLanka = getSriLankaDateString();
-
-    const latestPerRoom = await SensorReading.aggregate(getLatestPerRoomPipeline());
-
-    const todayRoomAgg = await SensorReading.aggregate([
-      buildDailyMatchByDate(todaySriLanka),
-      {
         $group: {
-          _id: "$room_id",
+          _id: null,
           total_energy_kwh: { $sum: "$interval_energy_kwh" },
           wasted_energy_kwh: { $sum: "$interval_wasted_energy_kwh" }
         }
       }
     ]);
 
-    const roomMap = new Map(
-      todayRoomAgg.map((r) => [
-        r._id,
-        {
-          total_energy_kwh: r.total_energy_kwh || 0,
-          wasted_energy_kwh: r.wasted_energy_kwh || 0
-        }
-      ])
-    );
+    const totalEnergy =
+      todayAgg.length > 0 ? Number(todayAgg[0].total_energy_kwh || 0) : 0;
 
-    const alerts = [];
+    const wastedEnergy =
+      todayAgg.length > 0 ? Number(todayAgg[0].wasted_energy_kwh || 0) : 0;
 
-    for (const room of latestPerRoom) {
-      const agg = roomMap.get(room.room_id) || {
-        total_energy_kwh: 0,
-        wasted_energy_kwh: 0
-      };
+    const wasteRatio =
+      totalEnergy > 0
+        ? Number(((wastedEnergy / totalEnergy) * 100).toFixed(2))
+        : 0;
 
-      const wasteRatio =
-        agg.total_energy_kwh > 0
-          ? (agg.wasted_energy_kwh / agg.total_energy_kwh) * 100
-          : 0;
+    const latest = await SensorReading.findOne({ room_id: roomId })
+      .sort({ captured_at: -1 })
+      .lean();
 
-      if (room.waste_stat === "Critical") {
-        alerts.push({
-          type: "critical",
-          title: "Critical Energy Waste",
-          message: `Room ${room.room_id} is currently wasting energy at a critical level.`,
-          room_id: room.room_id,
-          severity: "Critical",
-          captured_at: room.captured_at
-        });
-      }
-
-      if (wasteRatio >= 40) {
-        alerts.push({
-          type: "warning",
-          title: "High Waste Ratio",
-          message: `Room ${room.room_id} has a waste ratio of ${wasteRatio.toFixed(2)}% today.`,
-          room_id: room.room_id,
-          severity: "Warning",
-          captured_at: room.captured_at
-        });
-      }
-
-      if (agg.total_energy_kwh >= 3 && agg.wasted_energy_kwh === 0) {
-        alerts.push({
-          type: "info",
-          title: "High Energy Usage",
-          message: `Room ${room.room_id} has high energy usage today.`,
-          room_id: room.room_id,
-          severity: "Info",
-          captured_at: room.captured_at
-        });
-      }
-    }
-
-    const uniqueAlerts = alerts
-      .sort((a, b) => {
-        const priority = { Critical: 3, Warning: 2, Info: 1 };
-        return priority[b.severity] - priority[a.severity];
-      })
-      .slice(0, 6);
+    const currentWasteStatus =
+      latest?.waste_stat ||
+      (wasteRatio >= 30 ? "Critical" : wasteRatio >= 15 ? "Warning" : "Normal");
 
     res.json({
-      date: todaySriLanka,
-      alerts: uniqueAlerts
+      room_id: roomId,
+      total_energy_today_kwh: Number(totalEnergy.toFixed(4)),
+      wasted_energy_today_kwh: Number(wastedEnergy.toFixed(4)),
+      waste_ratio_today_percent: Number(wasteRatio.toFixed(2)),
+      current_waste_status: currentWasteStatus
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -344,12 +181,33 @@ async function getOwnerAlerts(req, res) {
 
 async function getOwnerRoomsOverview(req, res) {
   try {
-    const todaySriLanka = getSriLankaDateString();
+    const latestPerRoom = await SensorReading.aggregate([
+      { $sort: { captured_at: -1 } },
+      {
+        $group: {
+          _id: "$room_id",
+          latest: { $first: "$$ROOT" }
+        }
+      }
+    ]);
 
-    const latestPerRoom = await SensorReading.aggregate(getLatestPerRoomPipeline());
+    const now = new Date();
+
+    const startOfDay = new Date(now);
+    startOfDay.setHours(0, 0, 0, 0);
+
+    const endOfDay = new Date(now);
+    endOfDay.setHours(23, 59, 59, 999);
 
     const todayAgg = await SensorReading.aggregate([
-      buildDailyMatchByDate(todaySriLanka),
+      {
+        $match: {
+          captured_at: {
+            $gte: startOfDay,
+            $lte: endOfDay
+          }
+        }
+      },
       {
         $group: {
           _id: "$room_id",
@@ -359,55 +217,45 @@ async function getOwnerRoomsOverview(req, res) {
       }
     ]);
 
-    const aggMap = new Map(
-      todayAgg.map((item) => [
-        item._id,
-        {
-          total_energy_kwh: Number((item.total_energy_kwh || 0).toFixed(4)),
-          wasted_energy_kwh: Number((item.wasted_energy_kwh || 0).toFixed(4))
-        }
-      ])
-    );
+    const aggMap = todayAgg.reduce((acc, item) => {
+      acc[item._id] = item;
+      return acc;
+    }, {});
 
-    const rooms = latestPerRoom.map((room) => {
-      const agg = aggMap.get(room.room_id) || {
-        total_energy_kwh: 0,
-        wasted_energy_kwh: 0
-      };
+    const rooms = latestPerRoom.map(({ latest }) => {
+      const agg = aggMap[latest.room_id] || {};
 
+      const totalEnergy = Number(agg.total_energy_kwh || 0);
+      const wastedEnergy = Number(agg.wasted_energy_kwh || 0);
       const wasteRatio =
-        agg.total_energy_kwh > 0
-          ? Number(((agg.wasted_energy_kwh / agg.total_energy_kwh) * 100).toFixed(2))
+        totalEnergy > 0
+          ? Number(((wastedEnergy / totalEnergy) * 100).toFixed(2))
           : 0;
 
       const alertCount =
-        (room.waste_stat === "Critical" ? 1 : 0) +
-        (room.noise_stat === "Warning" || room.noise_stat === "Violation" ? 1 : 0);
+        (latest.waste_stat === "Critical" ? 1 : 0) +
+        (latest.noise_stat === "Warning" || latest.noise_stat === "Violation" ? 1 : 0);
 
       return {
-        room_id: room.room_id,
-        occupancy_stat: room.occupancy_stat,
-        noise_stat: room.noise_stat,
-        waste_stat: room.waste_stat,
-        door_status: room.door_status,
-        current_amp: room.current_amp,
-        total_energy_kwh: agg.total_energy_kwh,
-        wasted_energy_kwh: agg.wasted_energy_kwh,
-        waste_ratio_percent: wasteRatio,
-        last_activity: room.captured_at,
+        room_id: latest.room_id,
+        occupancy_stat: latest.occupancy_stat || "Unknown",
+        noise_stat: latest.noise_stat || "Compliant",
+        waste_stat:
+          latest.waste_stat ||
+          (wasteRatio >= 30 ? "Critical" : wasteRatio >= 15 ? "Warning" : "Normal"),
+        total_energy_kwh: Number(totalEnergy.toFixed(4)),
+        wasted_energy_kwh: Number(wastedEnergy.toFixed(4)),
+        waste_ratio_percent: Number(wasteRatio.toFixed(2)),
+        last_activity: latest.captured_at,
         alert_count: alertCount
       };
     });
 
-    res.json({
-      date: todaySriLanka,
-      rooms: rooms.sort((a, b) => a.room_id.localeCompare(b.room_id))
-    });
+    res.json({ rooms });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 }
-
 async function getDailyEnergyHistory(req, res) {
   try {
     const { roomId } = req.params;
@@ -430,40 +278,6 @@ async function getDailyEnergyHistory(req, res) {
   }
 }
 
-async function getTopWasteDays(req, res) {
-  try {
-    const { roomId } = req.params;
-    const limit = Number(req.query.limit || 5);
-
-    const results = await SensorReading.aggregate([
-      { $match: { room_id: roomId } },
-      buildDailyGroupStage(),
-      { $sort: { wasted_energy_kwh: -1 } },
-      { $limit: limit }
-    ]);
-
-    const days = results.map((item) => {
-      const totalEnergy = Number((item.total_energy_kwh || 0).toFixed(4));
-      const wastedEnergy = Number((item.wasted_energy_kwh || 0).toFixed(4));
-      const wasteRatio =
-        totalEnergy > 0 ? Number(((wastedEnergy / totalEnergy) * 100).toFixed(2)) : 0;
-
-      return {
-        date: item._id,
-        total_energy_kwh: totalEnergy,
-        wasted_energy_kwh: wastedEnergy,
-        waste_ratio_percent: wasteRatio
-      };
-    });
-
-    res.json({
-      room_id: roomId,
-      days
-    });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
-}
 
 async function getEnergyForecast(req, res) {
   try {
@@ -498,20 +312,133 @@ async function getEnergyForecast(req, res) {
   }
 }
 
+async function getOwnerAlerts(req, res) {
+  try {
+    const { roomId } = req.query;
+
+    const query = {
+      is_deleted: false,
+      status: "active"
+    };
+
+    if (roomId) {
+      query.room_id = roomId;
+    }
+
+    const alerts = await OwnerAlert.find(query)
+      .sort({ date: -1, createdAt: -1 })
+      .lean();
+
+    res.json({ alerts });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
+async function deleteOwnerAlert(req, res) {
+  try {
+    const { alertId } = req.params;
+
+    const updated = await OwnerAlert.findByIdAndUpdate(
+      alertId,
+      { $set: { is_deleted: true } },
+      { new: true }
+    );
+
+    if (!updated) {
+      return res.status(404).json({ message: "Alert not found" });
+    }
+
+    res.json({ message: "Alert deleted successfully" });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
+async function resolveOwnerAlert(req, res) {
+  try {
+    const { alertId } = req.params;
+
+    const updated = await OwnerAlert.findByIdAndUpdate(
+      alertId,
+      { $set: { status: "resolved" } },
+      { new: true }
+    );
+
+    if (!updated) {
+      return res.status(404).json({ message: "Alert not found" });
+    }
+
+    res.json({ message: "Alert resolved successfully" });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
+
+async function getOwnerAnomalies(req, res) {
+  try {
+    const { roomId } = req.query;
+
+    const query = {};
+    if (roomId) {
+      query.room_id = roomId;
+    }
+
+    const items = await OwnerAnomaly.find(query)
+      .sort({ date: -1 })
+      .lean();
+
+    res.json({ items });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
+async function getOwnerPatterns(req, res) {
+  try {
+    const items = await OwnerPattern.find()
+      .sort({ date: -1 })
+      .lean();
+
+    res.json({ items });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
+async function getOwnerForecasts(req, res) {
+  try {
+    const items = await OwnerForecast.find()
+      .sort({ date: 1 })
+      .lean();
+
+    res.json({ items });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
 // ================= WARDEN =================
 
 async function getWardenSummary(req, res) {
   try {
-    const latestPerRoom = await SensorReading.aggregate(getLatestPerRoomPipeline());
+    const latestPerRoom = await SensorReading.aggregate([
+      { $sort: { room_id: 1, captured_at: -1 } },
+      {
+        $group: {
+          _id: "$room_id",
+          latest: { $first: "$$ROOT" }
+        }
+      },
+      { $replaceRoot: { newRoot: "$latest" } }
+    ]);
 
     const summary = {
       occupied_rooms: 0,
       empty_rooms: 0,
       sleeping_rooms: 0,
       noise_issue_rooms: 0,
-      rooms_needing_inspection: 0,
-      stale_rooms: 0,
-      rooms_with_sensor_faults: 0
+      rooms_needing_inspection: 0
     };
 
     for (const room of latestPerRoom) {
@@ -523,45 +450,52 @@ async function getWardenSummary(req, res) {
         summary.noise_issue_rooms++;
       }
 
-      if (isStaleReading(room.captured_at)) {
-        summary.stale_rooms++;
-      }
-
-      if (hasAnySensorFault(room)) {
-        summary.rooms_with_sensor_faults++;
-      }
-
-      if (getInspectionReasons(room).length > 0) {
+      if (
+        room.waste_stat === "Critical" ||
+        room.noise_stat === "Violation" ||
+        room.sensor_faults?.pir ||
+        room.sensor_faults?.door ||
+        room.sensor_faults?.sound ||
+        room.sensor_faults?.current
+      ) {
         summary.rooms_needing_inspection++;
       }
     }
 
     res.json(summary);
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: "Failed to fetch warden summary",
-      error: error.message
-    });
+    res.status(500).json({ message: error.message });
   }
 }
 
 async function getWardenRoomsStatus(req, res) {
   try {
-    const latestPerRoom = await SensorReading.aggregate([
-      ...getLatestPerRoomPipeline(),
+    const rooms = await SensorReading.aggregate([
+      { $sort: { room_id: 1, captured_at: -1 } },
+      {
+        $group: {
+          _id: "$room_id",
+          latest: { $first: "$$ROOT" }
+        }
+      },
+      {
+        $project: {
+          _id: 0,
+          room_id: "$latest.room_id",
+          occupancy_stat: "$latest.occupancy_stat",
+          noise_stat: "$latest.noise_stat",
+          waste_stat: "$latest.waste_stat",
+          door_status: "$latest.door_status",
+          current_amp: "$latest.current_amp",
+          captured_at: "$latest.captured_at"
+        }
+      },
       { $sort: { room_id: 1 } }
     ]);
 
-    const rooms = latestPerRoom.map(toWardenRoomStatus);
-
     res.json({ rooms });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: "Failed to fetch room status",
-      error: error.message
-    });
+    res.status(500).json({ message: error.message });
   }
 }
 
@@ -578,13 +512,7 @@ async function getWardenNoiseIssues(req, res) {
         $group: {
           _id: "$room_id",
           latest: { $first: "$$ROOT" },
-          issue_count: { $sum: 1 },
-          warning_count: {
-            $sum: { $cond: [{ $eq: ["$noise_stat", "Warning"] }, 1, 0] }
-          },
-          violation_count: {
-            $sum: { $cond: [{ $eq: ["$noise_stat", "Violation"] }, 1, 0] }
-          }
+          issue_count: { $sum: 1 }
         }
       },
       {
@@ -592,135 +520,108 @@ async function getWardenNoiseIssues(req, res) {
           _id: 0,
           room_id: "$_id",
           issue_count: 1,
-          warning_count: 1,
-          violation_count: 1,
           latest_noise_stat: "$latest.noise_stat",
-          latest_sound_peak: { $round: ["$latest.sound_peak", 2] },
+          latest_sound_peak: "$latest.sound_peak",
           latest_captured_at: "$latest.captured_at"
         }
       },
-      { $sort: { issue_count: -1, room_id: 1 } }
+      { $sort: { issue_count: -1 } }
     ]);
 
     res.json({ rooms });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: "Failed to fetch noise issues",
-      error: error.message
-    });
+    res.status(500).json({ message: error.message });
   }
 }
 
-async function getWardenInspectionQueue(req, res) {
+async function getWardenFeatureImportance(req, res) {
   try {
-    const latestPerRoom = await SensorReading.aggregate([
-      ...getLatestPerRoomPipeline(),
-      { $sort: { room_id: 1 } }
-    ]);
-
-    const rooms = latestPerRoom
-      .map(toWardenRoomStatus)
-      .filter((room) => room.needs_inspection)
-      .map((room) => ({
-        room_id: room.room_id,
-        occupancy_stat: room.occupancy_stat,
-        noise_stat: room.noise_stat,
-        waste_stat: room.waste_stat,
-        door_status: room.door_status,
-        current_amp: room.current_amp,
-        sound_peak: room.sound_peak,
-        sensor_health: room.sensor_health,
-        sensor_faults: room.sensor_faults,
-        stale_data: room.stale_data,
-        inspection_reasons: room.inspection_reasons,
-        issue_count: room.inspection_reasons.length,
-        captured_at: room.captured_at
-      }))
-      .sort((a, b) => b.issue_count - a.issue_count || a.room_id.localeCompare(b.room_id));
-
-    res.json({ rooms });
+    const items = await WardenFeatureImportance.find().sort({ importance: -1 }).lean();
+    res.json({ items });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: "Failed to fetch inspection queue",
-      error: error.message
-    });
+    res.status(500).json({ message: error.message });
   }
 }
 
-async function getWardenNoiseTrend(req, res) {
+async function getWardenAnomalies(req, res) {
   try {
-    const days = Number(req.query.days || 7);
+    const items = await WardenAnomaly.find()
+      .sort({ date: -1 })
+      .lean();
 
-    const start = new Date();
-    start.setDate(start.getDate() - (days - 1));
-    start.setHours(0, 0, 0, 0);
+    res.json({ items });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
 
-    const trend = await SensorReading.aggregate([
-      {
-        $match: {
-          captured_at: { $gte: start },
-          noise_stat: { $in: ["Warning", "Violation"] }
-        }
-      },
-      {
-        $group: {
-          _id: {
-            date: {
-              $dateToString: {
-                format: "%Y-%m-%d",
-                date: "$captured_at",
-                timezone: TIMEZONE
-              }
-            },
-            noise_stat: "$noise_stat"
-          },
-          count: { $sum: 1 }
-        }
-      },
-      { $sort: { "_id.date": 1 } }
-    ]);
+async function getWardenPatterns(req, res) {
+  try {
+    const items = await WardenPattern.find()
+      .sort({ date: -1 })
+      .lean();
 
-    const dateMap = new Map();
+    res.json({ items });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
 
-    for (let i = 0; i < days; i++) {
-      const d = new Date(start);
-      d.setDate(start.getDate() + i);
-      const key = getSriLankaDateString(d);
-      dateMap.set(key, { date: key, warnings: 0, violations: 0, total: 0 });
+async function getWardenForecasts(req, res) {
+  try {
+    const items = await WardenForecast.find()
+      .sort({ date: 1 })
+      .lean();
+
+    res.json({ items });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
+async function getOwnerFeatureImportance(req, res) {
+  try {
+    const items = await OwnerFeatureImportance.find().sort({ importance: -1 }).lean();
+    res.json({ items });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
+async function getOwnerAnomalies(req, res) {
+  try {
+    const { roomId } = req.query;
+
+    const query = {};
+    if (roomId) {
+      query.room_id = roomId;
     }
 
-    for (const row of trend) {
-      const date = row._id.date;
-      const stat = row._id.noise_stat;
-      const item = dateMap.get(date) || { date, warnings: 0, violations: 0, total: 0 };
+    const items = await OwnerAnomaly.find(query)
+      .sort({ date: -1 })
+      .lean();
 
-      if (stat === "Warning") item.warnings += row.count;
-      if (stat === "Violation") item.violations += row.count;
-      item.total = item.warnings + item.violations;
-
-      dateMap.set(date, item);
-    }
-
-    res.json({
-      days,
-      trend: Array.from(dateMap.values())
-    });
+    res.json({ items });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: "Failed to fetch noise trend",
-      error: error.message
-    });
+    res.status(500).json({ message: error.message });
   }
 }
+
 
 // ================= SECURITY =================
 
 async function getSecuritySummary(req, res) {
   try {
-    const latestPerRoom = await SensorReading.aggregate(getLatestPerRoomPipeline());
+    const latestPerRoom = await SensorReading.aggregate([
+      { $sort: { room_id: 1, captured_at: -1 } },
+      {
+        $group: {
+          _id: "$room_id",
+          latest: { $first: "$$ROOT" }
+        }
+      },
+      { $replaceRoot: { newRoot: "$latest" } }
+    ]);
 
     const summary = {
       active_security_alerts: 0,
@@ -749,7 +650,14 @@ async function getSecuritySummary(req, res) {
 async function getSecuritySuspiciousRooms(req, res) {
   try {
     const rooms = await SensorReading.aggregate([
-      ...getLatestPerRoomPipeline(),
+      { $sort: { room_id: 1, captured_at: -1 } },
+      {
+        $group: {
+          _id: "$room_id",
+          latest: { $first: "$$ROOT" }
+        }
+      },
+      { $replaceRoot: { newRoot: "$latest" } },
       {
         $addFields: {
           suspicious: {
@@ -764,7 +672,10 @@ async function getSecuritySuspiciousRooms(req, res) {
                 $and: [
                   { $gt: ["$motion_count", 0] },
                   {
-                    $or: [{ $gte: ["$hour", 23] }, { $lte: ["$hour", 5] }]
+                    $or: [
+                      { $gte: ["$hour", 23] },
+                      { $lte: ["$hour", 5] }
+                    ]
                   }
                 ]
               }
@@ -842,8 +753,8 @@ async function getStudentOverview(req, res) {
         current_amp: latest.current_amp,
         captured_at: latest.captured_at
       },
-      today_energy_kwh: Number((today?.total_energy_kwh || 0).toFixed(4)),
-      today_wasted_energy_kwh: Number((today?.wasted_energy_kwh || 0).toFixed(4))
+      today_energy_kwh: Number(((today?.total_energy_kwh) || 0).toFixed(4)),
+      today_wasted_energy_kwh: Number(((today?.wasted_energy_kwh) || 0).toFixed(4))
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -883,17 +794,23 @@ async function getStudentRecentAlerts(req, res) {
 module.exports = {
   getLatestReading,
   getOwnerKpis,
-  getDailyEnergyHistory,
-  getTopWasteDays,
-  getEnergyForecast,
-  getOwnerRoomComparison,
+  getOwnerWeekdayPatterns,
+  getOwnerAnomalies,
+  getOwnerPatterns,
+  getOwnerForecasts,
   getOwnerRoomsOverview,
   getOwnerAlerts,
+  deleteOwnerAlert,
+  resolveOwnerAlert,
+  getDailyEnergyHistory,
+  getEnergyForecast,
   getWardenSummary,
   getWardenRoomsStatus,
   getWardenNoiseIssues,
-  getWardenInspectionQueue,
-  getWardenNoiseTrend,
+  getWardenFeatureImportance,
+  getWardenAnomalies,
+  getWardenPatterns,
+  getWardenForecasts,
   getSecuritySummary,
   getSecuritySuspiciousRooms,
   getSecurityDoorEvents,
