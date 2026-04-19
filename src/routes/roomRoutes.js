@@ -39,7 +39,6 @@ router.get("/owner/anomalies", getOwnerAnomalies);
 router.patch("/owner/alerts/:alertId/resolve", resolveOwnerAlert);
 router.delete("/owner/alerts/:alertId", deleteOwnerAlert);
 router.get("/owner/weekday-patterns", getOwnerWeekdayPatterns);
-
 router.get("/:roomId/owner-kpis", getOwnerKpis);
 router.get("/:roomId/energy/history", getDailyEnergyHistory);
 router.get("/:roomId/energy/forecast", getEnergyForecast);
