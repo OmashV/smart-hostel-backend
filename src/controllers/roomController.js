@@ -117,6 +117,68 @@ async function getOwnerWeekdayPatterns(req, res) {
   }
 }
 
+async function getOwnerKpis(req, res) {
+  try {
+    const { roomId } = req.params;
+
+    const now = new Date();
+
+    const startOfDay = new Date(now);
+    startOfDay.setHours(0, 0, 0, 0);
+
+    const endOfDay = new Date(now);
+    endOfDay.setHours(23, 59, 59, 999);
+
+    const todayAgg = await SensorReading.aggregate([
+      {
+        $match: {
+          room_id: roomId,
+          captured_at: {
+            $gte: startOfDay,
+            $lte: endOfDay
+          }
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          total_energy_kwh: { $sum: "$interval_energy_kwh" },
+          wasted_energy_kwh: { $sum: "$interval_wasted_energy_kwh" }
+        }
+      }
+    ]);
+
+    const totalEnergy =
+      todayAgg.length > 0 ? Number(todayAgg[0].total_energy_kwh || 0) : 0;
+
+    const wastedEnergy =
+      todayAgg.length > 0 ? Number(todayAgg[0].wasted_energy_kwh || 0) : 0;
+
+    const wasteRatio =
+      totalEnergy > 0
+        ? Number(((wastedEnergy / totalEnergy) * 100).toFixed(2))
+        : 0;
+
+    const latest = await SensorReading.findOne({ room_id: roomId })
+      .sort({ captured_at: -1 })
+      .lean();
+
+    const currentWasteStatus =
+      latest?.waste_stat ||
+      (wasteRatio >= 30 ? "Critical" : wasteRatio >= 15 ? "Warning" : "Normal");
+
+    res.json({
+      room_id: roomId,
+      total_energy_today_kwh: Number(totalEnergy.toFixed(4)),
+      wasted_energy_today_kwh: Number(wastedEnergy.toFixed(4)),
+      waste_ratio_today_percent: Number(wasteRatio.toFixed(2)),
+      current_waste_status: currentWasteStatus
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
 async function getOwnerRoomsOverview(req, res) {
   try {
     const latestPerRoom = await SensorReading.aggregate([
@@ -129,26 +191,44 @@ async function getOwnerRoomsOverview(req, res) {
       }
     ]);
 
-    const today = new Date();
-    const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(
-      today.getDate()
-    ).padStart(2, "0")}`;
+    const now = new Date();
 
-    const summaries = await DailyRoomSummary.find({ date: todayKey }).lean();
-    const summaryMap = summaries.reduce((acc, item) => {
-      acc[item.room_id] = item;
+    const startOfDay = new Date(now);
+    startOfDay.setHours(0, 0, 0, 0);
+
+    const endOfDay = new Date(now);
+    endOfDay.setHours(23, 59, 59, 999);
+
+    const todayAgg = await SensorReading.aggregate([
+      {
+        $match: {
+          captured_at: {
+            $gte: startOfDay,
+            $lte: endOfDay
+          }
+        }
+      },
+      {
+        $group: {
+          _id: "$room_id",
+          total_energy_kwh: { $sum: "$interval_energy_kwh" },
+          wasted_energy_kwh: { $sum: "$interval_wasted_energy_kwh" }
+        }
+      }
+    ]);
+
+    const aggMap = todayAgg.reduce((acc, item) => {
+      acc[item._id] = item;
       return acc;
     }, {});
 
     const rooms = latestPerRoom.map(({ latest }) => {
-      const summary = summaryMap[latest.room_id] || {};
+      const agg = aggMap[latest.room_id] || {};
 
-      const totalEnergy = Number(summary.total_energy_kwh || 0);
-      const wastedEnergy = Number(summary.wasted_energy_kwh || 0);
+      const totalEnergy = Number(agg.total_energy_kwh || 0);
+      const wastedEnergy = Number(agg.wasted_energy_kwh || 0);
       const wasteRatio =
-        summary.waste_ratio_percent !== undefined && summary.waste_ratio_percent !== null
-          ? Number(summary.waste_ratio_percent)
-          : totalEnergy > 0
+        totalEnergy > 0
           ? Number(((wastedEnergy / totalEnergy) * 100).toFixed(2))
           : 0;
 
@@ -160,10 +240,12 @@ async function getOwnerRoomsOverview(req, res) {
         room_id: latest.room_id,
         occupancy_stat: latest.occupancy_stat || "Unknown",
         noise_stat: latest.noise_stat || "Compliant",
-        waste_stat: latest.waste_stat || "Normal",
-        total_energy_kwh: totalEnergy,
-        wasted_energy_kwh: wastedEnergy,
-        waste_ratio_percent: wasteRatio,
+        waste_stat:
+          latest.waste_stat ||
+          (wasteRatio >= 30 ? "Critical" : wasteRatio >= 15 ? "Warning" : "Normal"),
+        total_energy_kwh: Number(totalEnergy.toFixed(4)),
+        wasted_energy_kwh: Number(wastedEnergy.toFixed(4)),
+        waste_ratio_percent: Number(wasteRatio.toFixed(2)),
         last_activity: latest.captured_at,
         alert_count: alertCount
       };
@@ -174,50 +256,6 @@ async function getOwnerRoomsOverview(req, res) {
     res.status(500).json({ message: error.message });
   }
 }
-
-async function getOwnerKpis(req, res) {
-  try {
-    const { roomId } = req.params;
-
-    const today = new Date();
-    const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(
-      today.getDate()
-    ).padStart(2, "0")}`;
-
-    const summary = await DailyRoomSummary.findOne({
-      room_id: roomId,
-      date: todayKey
-    }).lean();
-
-    const latest = await SensorReading.findOne({ room_id: roomId })
-      .sort({ captured_at: -1 })
-      .lean();
-
-    const totalEnergy = Number(summary?.total_energy_kwh || 0);
-    const wastedEnergy = Number(summary?.wasted_energy_kwh || 0);
-    const wasteRatio =
-      summary?.waste_ratio_percent !== undefined && summary?.waste_ratio_percent !== null
-        ? Number(summary.waste_ratio_percent)
-        : totalEnergy > 0
-        ? Number(((wastedEnergy / totalEnergy) * 100).toFixed(2))
-        : 0;
-
-    const currentWasteStatus =
-      latest?.waste_stat ||
-      (wasteRatio >= 30 ? "Critical" : wasteRatio >= 15 ? "Warning" : "Normal");
-
-    res.json({
-      room_id: roomId,
-      total_energy_today_kwh: totalEnergy,
-      wasted_energy_today_kwh: wastedEnergy,
-      waste_ratio_today_percent: wasteRatio,
-      current_waste_status: currentWasteStatus
-    });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
-}
-
 async function getDailyEnergyHistory(req, res) {
   try {
     const { roomId } = req.params;
@@ -553,6 +591,22 @@ async function getOwnerFeatureImportance(req, res) {
 async function getOwnerAnomalies(req, res) {
   try {
     const { roomId } = req.query;
+
+    const query = {};
+    if (roomId) {
+      query.room_id = roomId;
+    }
+
+    const items = await OwnerAnomaly.find(query)
+      .sort({ date: -1 })
+      .lean();
+
+    res.json({ items });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
 
 // ================= SECURITY =================
 
