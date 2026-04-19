@@ -554,8 +554,22 @@ async function getOwnerAnomalies(req, res) {
   try {
     const { roomId } = req.query;
 
-// ================= SECURITY =================
+    const query = {};
+    if (roomId) {
+      query.room_id = roomId;
+    }
 
+    const items = await OwnerAnomaly.find(query)
+      .sort({ date: -1 })
+      .lean();
+
+    res.json({ items });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
+// ================= SECURITY =================
 async function getSecuritySummary(req, res) {
   try {
     const latestPerRoom = await SensorReading.aggregate([
