@@ -721,6 +721,100 @@ async function getSecurityDoorEvents(req, res) {
   }
 }
 
+async function getSecurityTrend(req, res) {
+  try {
+    const { roomId } = req.query;
+    const recentLimit = Number(req.query.limit || 200);
+
+    const baseMatch = {
+      door_status: "Open",
+      door_stable_ms: { $gt: 0, $lt: 3600000 }, // ignore zero + extreme > 1 hour
+      time_valid: true,
+      "sensor_faults.door": false,
+      "sensor_health.door": true
+    };
+
+    if (roomId) {
+      baseMatch.room_id = roomId;
+    }
+
+    // Historical baseline = learned expected hourly trend
+    const historical = await SensorReading.aggregate([
+      { $match: baseMatch },
+      {
+        $group: {
+          _id: "$hour",
+          expected_door_stable_ms: { $avg: "$door_stable_ms" },
+          samples: { $sum: 1 }
+        }
+      },
+      { $sort: { _id: 1 } }
+    ]);
+
+    // Recent actual behavior
+    const recent = await SensorReading.aggregate([
+      { $match: baseMatch },
+      { $sort: { captured_at: -1 } },
+      { $limit: recentLimit },
+      {
+        $group: {
+          _id: "$hour",
+          actual_door_stable_ms: { $avg: "$door_stable_ms" },
+          recent_samples: { $sum: 1 }
+        }
+      },
+      { $sort: { _id: 1 } }
+    ]);
+
+    const recentMap = {};
+    recent.forEach((item) => {
+      recentMap[item._id] = item;
+    });
+
+    const trend = historical.map((item) => {
+      const recentItem = recentMap[item._id];
+
+      const expectedMs = Math.round(item.expected_door_stable_ms || 0);
+      const actualMs = Math.round(recentItem?.actual_door_stable_ms || 0);
+      const deviationMs = actualMs - expectedMs;
+
+      return {
+        hour: item._id,
+        hour_label: `${item._id}:00`,
+
+        expected_door_stable_ms: expectedMs,
+        actual_door_stable_ms: actualMs,
+        deviation_ms: deviationMs,
+
+        expected_door_stable_min: Number((expectedMs / 60000).toFixed(2)),
+        actual_door_stable_min: Number((actualMs / 60000).toFixed(2)),
+        deviation_min: Number((deviationMs / 60000).toFixed(2)),
+
+        samples: item.samples,
+        recent_samples: recentItem?.recent_samples || 0,
+
+        trend_status:
+          actualMs > expectedMs
+            ? "Above Expected"
+            : actualMs < expectedMs
+            ? "Below Expected"
+            : "Normal"
+      };
+    });
+
+    res.json({
+      summary: {
+        room_id: roomId || "ALL",
+        hours_covered: trend.length,
+        generated_from_recent_records: recentLimit
+      },
+      trend
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
 // ================= STUDENT =================
 
 async function getStudentOverview(req, res) {
@@ -814,6 +908,7 @@ module.exports = {
   getSecuritySummary,
   getSecuritySuspiciousRooms,
   getSecurityDoorEvents,
+  getSecurityTrend,
   getStudentOverview,
   getStudentEnergyHistory,
   getStudentRecentAlerts
