@@ -626,19 +626,32 @@ async function getSecuritySummary(req, res) {
     const summary = {
       active_security_alerts: 0,
       suspicious_rooms: 0,
-      door_open_rooms: 0
+      door_open_rooms: 0,
+      high_risk_rooms: 0,
+      after_hours_events: 0
     };
 
     for (const room of latestPerRoom) {
+      const isAfterHours = room.hour >= 23 || room.hour <= 5;
       const suspicious =
         (room.door_status === "Open" && room.door_stable_ms > 300000) ||
-        (room.motion_count > 0 && (room.hour >= 23 || room.hour <= 5));
+        (room.motion_count > 0 && isAfterHours);
+
+      let riskScore = 0;
+      if (room.door_status === "Open" && room.door_stable_ms > 1800000) riskScore += 3;
+      else if (room.door_status === "Open" && room.door_stable_ms > 600000) riskScore += 2;
+
+      if (room.motion_count === 0) riskScore += 1;
+      if (isAfterHours) riskScore += 2;
+      if (room.occupancy_stat === "Empty") riskScore += 2;
 
       if (room.door_status === "Open") summary.door_open_rooms++;
+      if (isAfterHours) summary.after_hours_events++;
       if (suspicious) {
         summary.suspicious_rooms++;
         summary.active_security_alerts++;
       }
+      if (riskScore >= 4) summary.high_risk_rooms++;
     }
 
     res.json(summary);
@@ -815,6 +828,141 @@ async function getSecurityTrend(req, res) {
   }
 }
 
+async function getSecurityAnomalies(req, res) {
+  try {
+    const { roomId } = req.query;
+    const limit = Number(req.query.limit || 50);
+
+    const baseMatch = {
+      door_status: "Open",
+      door_stable_ms: { $gt: 0, $lt: 3600000 },
+      time_valid: true,
+      "sensor_faults.door": false,
+      "sensor_health.door": true
+    };
+
+    if (roomId) {
+      baseMatch.room_id = roomId;
+    }
+
+    // historical expected duration by hour
+    const historical = await SensorReading.aggregate([
+      { $match: baseMatch },
+      {
+        $group: {
+          _id: "$hour",
+          expected_door_stable_ms: { $avg: "$door_stable_ms" }
+        }
+      }
+    ]);
+
+    const expectedMap = {};
+    historical.forEach((item) => {
+      expectedMap[item._id] = item.expected_door_stable_ms;
+    });
+
+    // recent events
+    const recentEvents = await SensorReading.find(baseMatch)
+      .sort({ captured_at: -1 })
+      .limit(limit)
+      .lean();
+
+    const anomalies = recentEvents.map((event) => {
+      const expected = expectedMap[event.hour] || 1;
+      const actual = event.door_stable_ms || 0;
+      const deviation = actual - expected;
+      const ratio = expected > 0 ? actual / expected : 0;
+      const durationMin = actual / 60000;
+      const isAfterHours = event.hour >= 23 || event.hour <= 5;
+
+      const reasons = [];
+      let riskScore = 0;
+
+      // anomaly ratio scoring
+      if (ratio > 4) {
+        riskScore += 4;
+        reasons.push("Door open far longer than expected");
+      } else if (ratio > 2) {
+        riskScore += 3;
+        reasons.push("Door open significantly longer than expected");
+      } else if (ratio > 1.5) {
+        riskScore += 2;
+        reasons.push("Door open moderately longer than expected");
+      }
+
+      // duration scoring
+      if (durationMin > 30) {
+        riskScore += 2;
+        reasons.push("Door open for more than 30 minutes");
+      } else if (durationMin > 10) {
+        riskScore += 1;
+        reasons.push("Door open for more than 10 minutes");
+      }
+
+      // motion scoring
+      if (event.motion_count === 0) {
+        riskScore += 2;
+        reasons.push("No motion detected");
+      }
+
+      // after-hours scoring
+      if (isAfterHours) {
+        riskScore += 2;
+        reasons.push("After-hours activity");
+      }
+
+      // occupancy scoring
+      if (event.occupancy_stat === "Empty") {
+        riskScore += 2;
+        reasons.push("Room marked as empty");
+      }
+
+      let riskLevel = "Low";
+      if (riskScore >= 6) riskLevel = "High";
+      else if (riskScore >= 3) riskLevel = "Medium";
+
+      let anomalyLevel = "Normal";
+      if (ratio > 3) anomalyLevel = "Critical";
+      else if (ratio > 1.5) anomalyLevel = "Warning";
+
+      return {
+        room_id: event.room_id,
+        captured_at: event.captured_at,
+        hour: event.hour,
+        door_status: event.door_status,
+        motion_count: event.motion_count,
+        occupancy_stat: event.occupancy_stat,
+
+        door_stable_ms: actual,
+        door_stable_min: Number(durationMin.toFixed(2)),
+
+        expected_door_stable_ms: Math.round(expected),
+        expected_door_stable_min: Number((expected / 60000).toFixed(2)),
+
+        deviation_ms: Math.round(deviation),
+        deviation_min: Number((deviation / 60000).toFixed(2)),
+
+        anomaly_ratio: Number(ratio.toFixed(2)),
+        anomaly_level: anomalyLevel,
+
+        risk_score: riskScore,
+        risk_level: riskLevel,
+        is_after_hours: isAfterHours,
+
+        reasons
+      };
+    });
+
+    const filtered = anomalies
+      .filter((item) => item.anomaly_level !== "Normal" || item.risk_score >= 3)
+      .sort((a, b) => b.risk_score - a.risk_score || b.anomaly_ratio - a.anomaly_ratio);
+
+    res.json({ anomalies: filtered });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
 // ================= STUDENT =================
 
 async function getStudentOverview(req, res) {
@@ -909,6 +1057,7 @@ module.exports = {
   getSecuritySuspiciousRooms,
   getSecurityDoorEvents,
   getSecurityTrend,
+  getSecurityAnomalies,
   getStudentOverview,
   getStudentEnergyHistory,
   getStudentRecentAlerts

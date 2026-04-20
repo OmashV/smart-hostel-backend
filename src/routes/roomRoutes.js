@@ -23,6 +23,7 @@ const {
   getSecuritySuspiciousRooms,
   getSecurityDoorEvents,
   getSecurityTrend,
+  getSecurityAnomalies,
   getStudentOverview,
   getStudentEnergyHistory,
   getStudentRecentAlerts
@@ -61,6 +62,7 @@ router.get("/security/summary", getSecuritySummary);
 router.get("/security/suspicious-rooms", getSecuritySuspiciousRooms);
 router.get("/security/door-events", getSecurityDoorEvents);
 router.get("/security/trend", getSecurityTrend);
+router.get("/security/anomalies", getSecurityAnomalies);
 
 // student
 router.get("/student/:roomId/overview", getStudentOverview);
