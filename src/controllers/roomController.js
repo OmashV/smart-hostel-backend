@@ -1,16 +1,15 @@
 const SensorReading = require("../models/SensorReading");
 const { buildForecast } = require("../services/forecastService");
 const OwnerForecast = require("../models/OwnerForecast");
-const OwnerFeatureImportance = require("../models/OwnerFeatureImportance");
 const OwnerAnomaly = require("../models/OwnerAnomaly");
 const OwnerPattern = require("../models/OwnerPattern");
 const DailyRoomSummary = require("../models/DailyRoomSummary");
+const OwnerAlert = require("../models/OwnerAlert");
+const OwnerWeekdayPattern = require("../models/OwnerWeekdayPattern");
 const WardenForecast = require("../models/WardenForecast");
 const WardenFeatureImportance = require("../models/WardenFeatureImportance");
 const WardenAnomaly = require("../models/WardenAnomaly");
 const WardenPattern = require("../models/WardenPattern");
-
-
 
 
 const TIMEZONE = "Asia/Colombo";
@@ -85,6 +84,101 @@ async function getLatestReading(req, res) {
 
 // ================= OWNER =================
 
+async function getOwnerWeekdayPatterns(req, res) {
+  try {
+    const { roomId } = req.query;
+
+    const query = {};
+    if (roomId) {
+      query.room_id = roomId;
+    }
+
+    const weekdayOrder = {
+      Monday: 1,
+      Tuesday: 2,
+      Wednesday: 3,
+      Thursday: 4,
+      Friday: 5,
+      Saturday: 6,
+      Sunday: 7
+    };
+
+    const items = await OwnerWeekdayPattern.find(query).lean();
+
+    items.sort((a, b) => {
+      const dayA = weekdayOrder[a.weekday_name] || 99;
+      const dayB = weekdayOrder[b.weekday_name] || 99;
+      return dayA - dayB;
+    });
+
+    res.json({ items });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
+async function getOwnerKpis(req, res) {
+  try {
+    const { roomId } = req.params;
+
+    const now = new Date();
+
+    const startOfDay = new Date(now);
+    startOfDay.setHours(0, 0, 0, 0);
+
+    const endOfDay = new Date(now);
+    endOfDay.setHours(23, 59, 59, 999);
+
+    const todayAgg = await SensorReading.aggregate([
+      {
+        $match: {
+          room_id: roomId,
+          captured_at: {
+            $gte: startOfDay,
+            $lte: endOfDay
+          }
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          total_energy_kwh: { $sum: "$interval_energy_kwh" },
+          wasted_energy_kwh: { $sum: "$interval_wasted_energy_kwh" }
+        }
+      }
+    ]);
+
+    const totalEnergy =
+      todayAgg.length > 0 ? Number(todayAgg[0].total_energy_kwh || 0) : 0;
+
+    const wastedEnergy =
+      todayAgg.length > 0 ? Number(todayAgg[0].wasted_energy_kwh || 0) : 0;
+
+    const wasteRatio =
+      totalEnergy > 0
+        ? Number(((wastedEnergy / totalEnergy) * 100).toFixed(2))
+        : 0;
+
+    const latest = await SensorReading.findOne({ room_id: roomId })
+      .sort({ captured_at: -1 })
+      .lean();
+
+    const currentWasteStatus =
+      latest?.waste_stat ||
+      (wasteRatio >= 30 ? "Critical" : wasteRatio >= 15 ? "Warning" : "Normal");
+
+    res.json({
+      room_id: roomId,
+      total_energy_today_kwh: Number(totalEnergy.toFixed(4)),
+      wasted_energy_today_kwh: Number(wastedEnergy.toFixed(4)),
+      waste_ratio_today_percent: Number(wasteRatio.toFixed(2)),
+      current_waste_status: currentWasteStatus
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
 async function getOwnerRoomsOverview(req, res) {
   try {
     const latestPerRoom = await SensorReading.aggregate([
@@ -97,26 +191,44 @@ async function getOwnerRoomsOverview(req, res) {
       }
     ]);
 
-    const today = new Date();
-    const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(
-      today.getDate()
-    ).padStart(2, "0")}`;
+    const now = new Date();
 
-    const summaries = await DailyRoomSummary.find({ date: todayKey }).lean();
-    const summaryMap = summaries.reduce((acc, item) => {
-      acc[item.room_id] = item;
+    const startOfDay = new Date(now);
+    startOfDay.setHours(0, 0, 0, 0);
+
+    const endOfDay = new Date(now);
+    endOfDay.setHours(23, 59, 59, 999);
+
+    const todayAgg = await SensorReading.aggregate([
+      {
+        $match: {
+          captured_at: {
+            $gte: startOfDay,
+            $lte: endOfDay
+          }
+        }
+      },
+      {
+        $group: {
+          _id: "$room_id",
+          total_energy_kwh: { $sum: "$interval_energy_kwh" },
+          wasted_energy_kwh: { $sum: "$interval_wasted_energy_kwh" }
+        }
+      }
+    ]);
+
+    const aggMap = todayAgg.reduce((acc, item) => {
+      acc[item._id] = item;
       return acc;
     }, {});
 
     const rooms = latestPerRoom.map(({ latest }) => {
-      const summary = summaryMap[latest.room_id] || {};
+      const agg = aggMap[latest.room_id] || {};
 
-      const totalEnergy = Number(summary.total_energy_kwh || 0);
-      const wastedEnergy = Number(summary.wasted_energy_kwh || 0);
+      const totalEnergy = Number(agg.total_energy_kwh || 0);
+      const wastedEnergy = Number(agg.wasted_energy_kwh || 0);
       const wasteRatio =
-        summary.waste_ratio_percent !== undefined && summary.waste_ratio_percent !== null
-          ? Number(summary.waste_ratio_percent)
-          : totalEnergy > 0
+        totalEnergy > 0
           ? Number(((wastedEnergy / totalEnergy) * 100).toFixed(2))
           : 0;
 
@@ -128,10 +240,12 @@ async function getOwnerRoomsOverview(req, res) {
         room_id: latest.room_id,
         occupancy_stat: latest.occupancy_stat || "Unknown",
         noise_stat: latest.noise_stat || "Compliant",
-        waste_stat: latest.waste_stat || "Normal",
-        total_energy_kwh: totalEnergy,
-        wasted_energy_kwh: wastedEnergy,
-        waste_ratio_percent: wasteRatio,
+        waste_stat:
+          latest.waste_stat ||
+          (wasteRatio >= 30 ? "Critical" : wasteRatio >= 15 ? "Warning" : "Normal"),
+        total_energy_kwh: Number(totalEnergy.toFixed(4)),
+        wasted_energy_kwh: Number(wastedEnergy.toFixed(4)),
+        waste_ratio_percent: Number(wasteRatio.toFixed(2)),
         last_activity: latest.captured_at,
         alert_count: alertCount
       };
@@ -142,50 +256,6 @@ async function getOwnerRoomsOverview(req, res) {
     res.status(500).json({ message: error.message });
   }
 }
-
-async function getOwnerKpis(req, res) {
-  try {
-    const { roomId } = req.params;
-
-    const today = new Date();
-    const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(
-      today.getDate()
-    ).padStart(2, "0")}`;
-
-    const summary = await DailyRoomSummary.findOne({
-      room_id: roomId,
-      date: todayKey
-    }).lean();
-
-    const latest = await SensorReading.findOne({ room_id: roomId })
-      .sort({ captured_at: -1 })
-      .lean();
-
-    const totalEnergy = Number(summary?.total_energy_kwh || 0);
-    const wastedEnergy = Number(summary?.wasted_energy_kwh || 0);
-    const wasteRatio =
-      summary?.waste_ratio_percent !== undefined && summary?.waste_ratio_percent !== null
-        ? Number(summary.waste_ratio_percent)
-        : totalEnergy > 0
-        ? Number(((wastedEnergy / totalEnergy) * 100).toFixed(2))
-        : 0;
-
-    const currentWasteStatus =
-      latest?.waste_stat ||
-      (wasteRatio >= 30 ? "Critical" : wasteRatio >= 15 ? "Warning" : "Normal");
-
-    res.json({
-      room_id: roomId,
-      total_energy_today_kwh: totalEnergy,
-      wasted_energy_today_kwh: wastedEnergy,
-      waste_ratio_today_percent: wasteRatio,
-      current_waste_status: currentWasteStatus
-    });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
-}
-
 async function getDailyEnergyHistory(req, res) {
   try {
     const { roomId } = req.params;
@@ -208,28 +278,6 @@ async function getDailyEnergyHistory(req, res) {
   }
 }
 
-async function getTopWasteDays(req, res) {
-  try {
-    const { roomId } = req.params;
-    const limit = Number(req.query.limit || 5);
-
-    const results = await SensorReading.aggregate([
-      { $match: { room_id: roomId } },
-      buildDailyGroupStage(),
-      { $sort: { wasted_energy_kwh: -1 } },
-      { $limit: limit }
-    ]);
-
-    const days = mapDailyRows(results);
-
-    res.json({
-      room_id: roomId,
-      days
-    });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
-}
 
 async function getEnergyForecast(req, res) {
   try {
@@ -266,39 +314,20 @@ async function getEnergyForecast(req, res) {
 
 async function getOwnerAlerts(req, res) {
   try {
-    const latestPerRoom = await SensorReading.aggregate([
-      { $sort: { captured_at: -1 } },
-      {
-        $group: {
-          _id: "$room_id",
-          latest: { $first: "$$ROOT" }
-        }
-      }
-    ]);
+    const { roomId } = req.query;
 
-    const alerts = [];
+    const query = {
+      is_deleted: false,
+      status: "active"
+    };
 
-    latestPerRoom.forEach(({ latest }) => {
-      if (latest.waste_stat === "Critical") {
-        alerts.push({
-          room_id: latest.room_id,
-          severity: "Critical",
-          title: "High Energy Waste",
-          message: "Room is showing critical waste behavior.",
-          captured_at: latest.captured_at
-        });
-      }
+    if (roomId) {
+      query.room_id = roomId;
+    }
 
-      if (latest.noise_stat === "Warning" || latest.noise_stat === "Violation") {
-        alerts.push({
-          room_id: latest.room_id,
-          severity: "Warning",
-          title: "Noise Issue",
-          message: "Room has abnormal or non-compliant noise behavior.",
-          captured_at: latest.captured_at
-        });
-      }
-    });
+    const alerts = await OwnerAlert.find(query)
+      .sort({ date: -1, createdAt: -1 })
+      .lean();
 
     res.json({ alerts });
   } catch (error) {
@@ -306,6 +335,89 @@ async function getOwnerAlerts(req, res) {
   }
 }
 
+async function deleteOwnerAlert(req, res) {
+  try {
+    const { alertId } = req.params;
+
+    const updated = await OwnerAlert.findByIdAndUpdate(
+      alertId,
+      { $set: { is_deleted: true } },
+      { new: true }
+    );
+
+    if (!updated) {
+      return res.status(404).json({ message: "Alert not found" });
+    }
+
+    res.json({ message: "Alert deleted successfully" });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
+async function resolveOwnerAlert(req, res) {
+  try {
+    const { alertId } = req.params;
+
+    const updated = await OwnerAlert.findByIdAndUpdate(
+      alertId,
+      { $set: { status: "resolved" } },
+      { new: true }
+    );
+
+    if (!updated) {
+      return res.status(404).json({ message: "Alert not found" });
+    }
+
+    res.json({ message: "Alert resolved successfully" });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
+
+async function getOwnerAnomalies(req, res) {
+  try {
+    const { roomId } = req.query;
+
+    const query = {};
+    if (roomId) {
+      query.room_id = roomId;
+    }
+
+    const items = await OwnerAnomaly.find(query)
+      .sort({ date: -1 })
+      .lean();
+
+    res.json({ items });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
+async function getOwnerPatterns(req, res) {
+  try {
+    const items = await OwnerPattern.find()
+      .sort({ date: -1 })
+      .lean();
+
+    res.json({ items });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
+async function getOwnerForecasts(req, res) {
+  try {
+    const items = await OwnerForecast.find()
+      .sort({ date: 1 })
+      .lean();
+
+    res.json({ items });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
 // ================= WARDEN =================
 
 async function getWardenSummary(req, res) {
@@ -466,128 +578,6 @@ async function getWardenForecasts(req, res) {
     res.status(500).json({ message: error.message });
   }
 }
-async function getWardenInspectionQueue(req, res) {
-  try {
-    const latestReadings = await SensorReading.aggregate([
-      { $sort: { room_id: 1, captured_at: -1 } },
-      {
-        $group: {
-          _id: "$room_id",
-          latest: { $first: "$$ROOT" }
-        }
-      },
-      {
-        $replaceRoot: { newRoot: "$latest" }
-      }
-    ]);
-
-    const rooms = latestReadings
-      .map((room) => {
-        const inspection_reasons = [];
-
-        if (room.waste_stat === "Critical") {
-          inspection_reasons.push("Critical waste detected");
-        }
-
-        if (
-          room.noise_stat === "Violation" ||
-          room.noise_stat === "Warning" ||
-          room.noise_stat === "Complaint" ||
-          room.noise_stat === "Compliant"
-        ) {
-          inspection_reasons.push("Noise issue detected");
-        }
-
-        if (room.sensor_faults) {
-          if (room.sensor_faults.pir) inspection_reasons.push("PIR sensor fault");
-          if (room.sensor_faults.door) inspection_reasons.push("Door sensor fault");
-          if (room.sensor_faults.sound) inspection_reasons.push("Sound sensor fault");
-          if (room.sensor_faults.current) inspection_reasons.push("Current sensor fault");
-        }
-
-        return {
-          room_id: room.room_id,
-          occupancy_stat: room.occupancy_stat,
-          noise_stat: room.noise_stat,
-          waste_stat: room.waste_stat,
-          door_status: room.door_status,
-          current_amp: room.current_amp,
-          sound_peak: room.sound_peak,
-          sensor_faults: room.sensor_faults || {},
-          inspection_reasons,
-          captured_at: room.captured_at,
-          needs_inspection: inspection_reasons.length > 0
-        };
-      })
-      .filter((room) => room.inspection_reasons.length > 0);
-
-    res.json({ rooms });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
-}
-
-async function getWardenNoiseTrend(req, res) {
-  try {
-    const days = Number(req.query.days || 7);
-    const startDate = new Date();
-    startDate.setDate(startDate.getDate() - (days - 1));
-    startDate.setHours(0, 0, 0, 0);
-
-    const trend = await SensorReading.aggregate([
-      {
-        $match: {
-          captured_at: { $gte: startDate }
-        }
-      },
-      {
-        $group: {
-          _id: {
-            date: {
-              $dateToString: {
-                format: "%Y-%m-%d",
-                date: "$captured_at"
-              }
-            }
-          },
-          warnings: {
-            $sum: {
-              $cond: [
-                {
-                  $or: [
-                    { $eq: ["$noise_stat", "Warning"] },
-                    { $eq: ["$noise_stat", "Complaint"] },
-                    { $eq: ["$noise_stat", "Compliant"] }
-                  ]
-                },
-                1,
-                0
-              ]
-            }
-          },
-          violations: {
-            $sum: {
-              $cond: [{ $eq: ["$noise_stat", "Violation"] }, 1, 0]
-            }
-          }
-        }
-      },
-      {
-        $project: {
-          _id: 0,
-          date: "$_id.date",
-          warnings: 1,
-          violations: 1
-        }
-      },
-      { $sort: { date: 1 } }
-    ]);
-
-    res.json({ trend });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
-}
 
 async function getOwnerFeatureImportance(req, res) {
   try {
@@ -600,7 +590,14 @@ async function getOwnerFeatureImportance(req, res) {
 
 async function getOwnerAnomalies(req, res) {
   try {
-    const items = await OwnerAnomaly.find({ is_anomaly: true })
+    const { roomId } = req.query;
+
+    const query = {};
+    if (roomId) {
+      query.room_id = roomId;
+    }
+
+    const items = await OwnerAnomaly.find(query)
       .sort({ date: -1 })
       .lean();
 
@@ -610,31 +607,8 @@ async function getOwnerAnomalies(req, res) {
   }
 }
 
-async function getOwnerPatterns(req, res) {
-  try {
-    const items = await OwnerPattern.find()
-      .sort({ date: -1 })
-      .lean();
 
-    res.json({ items });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
-}
-
-async function getOwnerForecasts(req, res) {
-  try {
-    const items = await OwnerForecast.find()
-      .sort({ date: 1 })
-      .lean();
-
-    res.json({ items });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
-}
 // ================= SECURITY =================
-
 async function getSecuritySummary(req, res) {
   try {
     const latestPerRoom = await SensorReading.aggregate([
@@ -819,14 +793,15 @@ async function getStudentRecentAlerts(req, res) {
 module.exports = {
   getLatestReading,
   getOwnerKpis,
-  getOwnerFeatureImportance,
+  getOwnerWeekdayPatterns,
   getOwnerAnomalies,
   getOwnerPatterns,
   getOwnerForecasts,
   getOwnerRoomsOverview,
   getOwnerAlerts,
+  deleteOwnerAlert,
+  resolveOwnerAlert,
   getDailyEnergyHistory,
-  getTopWasteDays,
   getEnergyForecast,
   getWardenSummary,
   getWardenRoomsStatus,
@@ -835,8 +810,6 @@ module.exports = {
   getWardenAnomalies,
   getWardenPatterns,
   getWardenForecasts,
-  getWardenInspectionQueue,
-  getWardenNoiseTrend,
   getSecuritySummary,
   getSecuritySuspiciousRooms,
   getSecurityDoorEvents,
