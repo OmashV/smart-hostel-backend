@@ -56,10 +56,8 @@ for room_id in rooms:
         columns={"datetime": "ds", "violation_count": "y"}
     )
 
-    room_df["occupied_binary"] = (room_df["occupied_count"] > 0).astype(int)
-
-    occupancy_df = room_df[["datetime", "occupied_binary"]].rename(
-    columns={"datetime": "ds", "occupied_binary": "y"}
+    occupancy_df = room_df[["datetime", "occupied_count"]].rename(
+        columns={"datetime": "ds", "occupied_count": "y"}
     )
 
     warning_model = Prophet(
@@ -93,7 +91,7 @@ for room_id in rooms:
 
     warning_forecast["yhat"] = warning_forecast["yhat"].clip(lower=0)
     violation_forecast["yhat"] = violation_forecast["yhat"].clip(lower=0)
-    occupancy_forecast["yhat"] = occupancy_forecast["yhat"].clip(lower=0, upper=1)
+    occupancy_forecast["yhat"] = occupancy_forecast["yhat"].clip(lower=0)
 
     merged = pd.merge(
         warning_forecast,
@@ -111,9 +109,9 @@ for room_id in rooms:
         doc = {
             "room_id": room_id,
             "date": row["ds"].strftime("%Y-%m-%d %H:%M:%S"),
-            "predicted_warning_count": max(0, int(round(row["yhat_warning"]))),
+            "predicted_warning_count": round(float(row["yhat_warning"]), 4),
             "predicted_violation_count": round(float(row["yhat_violation"]), 4),
-            "predicted_occupied_count": int(round(row["yhat_occupied"])),
+            "predicted_occupied_count": round(float(row["yhat_occupied"]), 4),
             "model_name": "prophet"
         }
         forecast_docs.append(doc)
@@ -195,7 +193,7 @@ if len(anomaly_features) >= 8:
             "avg_sound_peak": round(float(row["avg_sound_peak"]), 2),
             "avg_current": round(float(row["avg_current"]), 4),
             "violation_count": int(row["violation_count"]),
-            "anomaly_score": abs(round(float(row["anomaly_score"]), 4))
+            "anomaly_score": round(float(row["anomaly_score"]), 4)
         }
         anomaly_docs.append(doc)
         db.warden_anomalies.update_one(
