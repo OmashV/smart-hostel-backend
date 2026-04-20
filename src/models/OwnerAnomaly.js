@@ -8,6 +8,8 @@ const OwnerAnomalySchema = new mongoose.Schema(
     reason: { type: String, default: "" },
     total_energy_kwh: { type: Number, default: 0 },
     wasted_energy_kwh: { type: Number, default: 0 },
+    waste_ratio_percent: { type: Number, default: 0 },
+    avg_current: { type: Number, default: 0 },
     anomaly_score: { type: Number, default: 0 }
   },
   { timestamps: true }
