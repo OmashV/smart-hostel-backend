@@ -9,6 +9,7 @@ const {
   getOwnerRoomsOverview,
   getOwnerAlerts,
   getDailyEnergyHistory,
+  getTopWasteDays,
   getEnergyForecast,
   getWardenSummary,
   getWardenRoomsStatus,
@@ -19,13 +20,13 @@ const {
   getWardenAnomalies,
   getWardenPatterns,
   getWardenForecasts,
+  getWardenHistory,
   getSecuritySummary,
   getSecuritySuspiciousRooms,
   getSecurityDoorEvents,
   getStudentOverview,
   getStudentEnergyHistory,
   getStudentRecentAlerts
-  
 } = require("../controllers/roomController");
 
 const router = express.Router();
@@ -54,6 +55,7 @@ router.get("/warden/feature-importance", getWardenFeatureImportance);
 router.get("/warden/anomalies", getWardenAnomalies);
 router.get("/warden/patterns", getWardenPatterns);
 router.get("/warden/forecasts", getWardenForecasts);
+router.get("/warden/history", getWardenHistory);
 
 // security
 router.get("/security/summary", getSecuritySummary);
