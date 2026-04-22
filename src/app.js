@@ -12,7 +12,7 @@ app.get("/", (req, res) => {
   res.json({ message: "Smart Hostel analytics backend is running" });
 });
 
-app.use("/api/rooms", roomRoutes);
 app.use("/api/rooms/student", studentRoutes);
+app.use("/api/rooms", roomRoutes);
 
 module.exports = app;
