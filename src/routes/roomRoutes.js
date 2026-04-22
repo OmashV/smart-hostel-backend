@@ -9,7 +9,6 @@ const {
   getOwnerRoomsOverview,
   getOwnerAlerts,
   getDailyEnergyHistory,
-  getTopWasteDays,
   getEnergyForecast,
   getWardenSummary,
   getWardenRoomsStatus,
@@ -26,6 +25,7 @@ const {
   getStudentOverview,
   getStudentEnergyHistory,
   getStudentRecentAlerts
+  
 } = require("../controllers/roomController");
 
 const router = express.Router();
@@ -36,7 +36,6 @@ router.get("/:roomId/latest-reading", getLatestReading);
 // owner
 router.get("/:roomId/owner-kpis", getOwnerKpis);
 router.get("/:roomId/energy/history", getDailyEnergyHistory);
-router.get("/:roomId/energy/top-waste-days", getTopWasteDays);
 router.get("/:roomId/energy/forecast", getEnergyForecast);
 router.get("/owner/feature-importance", getOwnerFeatureImportance);
 router.get("/owner/anomalies", getOwnerAnomalies);
