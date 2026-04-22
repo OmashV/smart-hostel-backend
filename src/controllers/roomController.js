@@ -10,6 +10,8 @@ const WardenForecast = require("../models/WardenForecast");
 const WardenFeatureImportance = require("../models/WardenFeatureImportance");
 const WardenAnomaly = require("../models/WardenAnomaly");
 const WardenPattern = require("../models/WardenPattern");
+const SecurityForecast = require("../models/SecurityForecast");
+const SecurityAnomaly = require("../models/SecurityAnomaly");
 
 
 const TIMEZONE = "Asia/Colombo";
@@ -767,81 +769,85 @@ async function getSecurityDoorEvents(req, res) {
 async function getSecurityTrend(req, res) {
   try {
     const { roomId } = req.query;
-    const recentLimit = Number(req.query.limit || 200);
 
+    // Step 1: Pull Prophet forecasts from ML collection
+    const forecastQuery = { model_name: "prophet" };
+    if (roomId) forecastQuery.room_id = roomId;
+
+    const forecasts = await SecurityForecast.find(forecastQuery)
+      .sort({ hour: 1 })
+      .select("room_id hour hour_label expected_door_stable_ms expected_door_stable_min lower_bound_ms upper_bound_ms -_id")
+      .lean();
+
+    if (!forecasts.length) {
+      return res.json({ trend: [], summary: { room_id: roomId || "ALL" } });
+    }
+
+    // Step 2: Pull recent actual readings grouped by hour
     const baseMatch = {
       door_status: "Open",
-      door_stable_ms: { $gt: 0, $lt: 3600000 }, // ignore zero + extreme > 1 hour
+      door_stable_ms: { $gt: 0, $lt: 3600000 },
       time_valid: true,
       "sensor_faults.door": false,
       "sensor_health.door": true
     };
+    if (roomId) baseMatch.room_id = roomId;
 
-    if (roomId) {
-      baseMatch.room_id = roomId;
-    }
-
-    // Historical baseline = learned expected hourly trend
-    const historical = await SensorReading.aggregate([
-      { $match: baseMatch },
-      {
-        $group: {
-          _id: "$hour",
-          expected_door_stable_ms: { $avg: "$door_stable_ms" },
-          samples: { $sum: 1 }
-        }
-      },
-      { $sort: { _id: 1 } }
-    ]);
-
-    // Recent actual behavior
-    const recent = await SensorReading.aggregate([
+    const recentActual = await SensorReading.aggregate([
       { $match: baseMatch },
       { $sort: { captured_at: -1 } },
-      { $limit: recentLimit },
+      { $limit: 200 },
       {
         $group: {
           _id: "$hour",
           actual_door_stable_ms: { $avg: "$door_stable_ms" },
           recent_samples: { $sum: 1 }
         }
-      },
-      { $sort: { _id: 1 } }
+      }
     ]);
 
-    const recentMap = {};
-    recent.forEach((item) => {
-      recentMap[item._id] = item;
+    // Step 3: Map actual results by hour for easy lookup
+    const actualMap = {};
+    recentActual.forEach((item) => {
+      actualMap[item._id] = item;
     });
 
-    const trend = historical.map((item) => {
-      const recentItem = recentMap[item._id];
-
-      const expectedMs = Math.round(item.expected_door_stable_ms || 0);
-      const actualMs = Math.round(recentItem?.actual_door_stable_ms || 0);
+    // Step 4: Merge Prophet forecast with actual readings
+    const trend = forecasts.map((forecast) => {
+      const actual = actualMap[forecast.hour];
+      const actualMs = Math.round(actual?.actual_door_stable_ms || 0);
+      const expectedMs = Math.round(forecast.expected_door_stable_ms || 0);
       const deviationMs = actualMs - expectedMs;
 
+      // Use Prophet confidence bands to determine status
+      // This replaces the old simple above/below check
+      let trend_status = "Normal";
+      if (actualMs > forecast.upper_bound_ms) trend_status = "Above Expected (Anomalous)";
+      else if (actualMs < forecast.lower_bound_ms) trend_status = "Below Expected (Anomalous)";
+      else if (actualMs > expectedMs) trend_status = "Above Expected (Normal Range)";
+      else if (actualMs < expectedMs) trend_status = "Below Expected (Normal Range)";
+
       return {
-        hour: item._id,
-        hour_label: `${item._id}:00`,
+        hour: forecast.hour,
+        hour_label: forecast.hour_label,
 
+        // Prophet ML values
         expected_door_stable_ms: expectedMs,
-        actual_door_stable_ms: actualMs,
-        deviation_ms: deviationMs,
+        expected_door_stable_min: forecast.expected_door_stable_min,
+        lower_bound_ms: Math.round(forecast.lower_bound_ms),
+        upper_bound_ms: Math.round(forecast.upper_bound_ms),
 
-        expected_door_stable_min: Number((expectedMs / 60000).toFixed(2)),
+        // Actual sensor readings
+        actual_door_stable_ms: actualMs,
         actual_door_stable_min: Number((actualMs / 60000).toFixed(2)),
+        recent_samples: actual?.recent_samples || 0,
+
+        // Deviation from ML forecast
+        deviation_ms: deviationMs,
         deviation_min: Number((deviationMs / 60000).toFixed(2)),
 
-        samples: item.samples,
-        recent_samples: recentItem?.recent_samples || 0,
-
-        trend_status:
-          actualMs > expectedMs
-            ? "Above Expected"
-            : actualMs < expectedMs
-            ? "Below Expected"
-            : "Normal"
+        trend_status,
+        model_name: "prophet"           // makes ML origin visible in the dashboard
       };
     });
 
@@ -849,10 +855,11 @@ async function getSecurityTrend(req, res) {
       summary: {
         room_id: roomId || "ALL",
         hours_covered: trend.length,
-        generated_from_recent_records: recentLimit
+        model_name: "prophet"
       },
       trend
     });
+
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -863,131 +870,76 @@ async function getSecurityAnomalies(req, res) {
     const { roomId } = req.query;
     const limit = Number(req.query.limit || 50);
 
-    const baseMatch = {
-      door_status: "Open",
-      door_stable_ms: { $gt: 0, $lt: 3600000 },
-      time_valid: true,
-      "sensor_faults.door": false,
-      "sensor_health.door": true
-    };
+    // Step 1: Pull Isolation Forest anomalies from ML collection
+    const anomalyQuery = { model_name: "isolation_forest" };
+    if (roomId) anomalyQuery.room_id = roomId;
 
-    if (roomId) {
-      baseMatch.room_id = roomId;
-    }
-
-    // historical expected duration by hour
-    const historical = await SensorReading.aggregate([
-      { $match: baseMatch },
-      {
-        $group: {
-          _id: "$hour",
-          expected_door_stable_ms: { $avg: "$door_stable_ms" }
-        }
-      }
-    ]);
-
-    const expectedMap = {};
-    historical.forEach((item) => {
-      expectedMap[item._id] = item.expected_door_stable_ms;
-    });
-
-    // recent events
-    const recentEvents = await SensorReading.find(baseMatch)
-      .sort({ captured_at: -1 })
+    const mlAnomalies = await SecurityAnomaly.find(anomalyQuery)
+      .sort({ anomaly_score: 1 })       // most anomalous first (most negative score)
       .limit(limit)
+      .select("-_id -__v")
       .lean();
 
-    const anomalies = recentEvents.map((event) => {
-      const expected = expectedMap[event.hour] || 1;
-      const actual = event.door_stable_ms || 0;
-      const deviation = actual - expected;
-      const ratio = expected > 0 ? actual / expected : 0;
-      const durationMin = actual / 60000;
-      const isAfterHours = event.hour >= 23 || event.hour <= 5;
+    if (!mlAnomalies.length) {
+      return res.json({ anomalies: [] });
+    }
 
-      const reasons = [];
-      let riskScore = 0;
+    // Step 2: Enrich each anomaly with Prophet forecast context
+    // Pull forecasts for reference (expected values + confidence bands)
+    const forecastQuery = { model_name: "prophet" };
+    if (roomId) forecastQuery.room_id = roomId;
 
-      // anomaly ratio scoring
-      if (ratio > 4) {
-        riskScore += 4;
-        reasons.push("Door open far longer than expected");
-      } else if (ratio > 2) {
-        riskScore += 3;
-        reasons.push("Door open significantly longer than expected");
-      } else if (ratio > 1.5) {
-        riskScore += 2;
-        reasons.push("Door open moderately longer than expected");
-      }
+    const forecasts = await SecurityForecast.find(forecastQuery).lean();
 
-      // duration scoring
-      if (durationMin > 30) {
-        riskScore += 2;
-        reasons.push("Door open for more than 30 minutes");
-      } else if (durationMin > 10) {
-        riskScore += 1;
-        reasons.push("Door open for more than 10 minutes");
-      }
+    // Map forecasts by room_id + hour for fast lookup
+    const forecastMap = {};
+    forecasts.forEach((f) => {
+      forecastMap[`${f.room_id}_${f.hour}`] = f;
+    });
 
-      // motion scoring
-      if (event.motion_count === 0) {
-        riskScore += 2;
-        reasons.push("No motion detected");
-      }
+    // Step 3: Build enriched response
+    const anomalies = mlAnomalies.map((anomaly) => {
+      const forecastKey = `${anomaly.room_id}_${anomaly.hour}`;
+      const forecast = forecastMap[forecastKey];
 
-      // after-hours scoring
-      if (isAfterHours) {
-        riskScore += 2;
-        reasons.push("After-hours activity");
-      }
-
-      // occupancy scoring
-      if (event.occupancy_stat === "Empty") {
-        riskScore += 2;
-        reasons.push("Room marked as empty");
-      }
-
-      let riskLevel = "Low";
-      if (riskScore >= 6) riskLevel = "High";
-      else if (riskScore >= 3) riskLevel = "Medium";
-
-      let anomalyLevel = "Normal";
-      if (ratio > 3) anomalyLevel = "Critical";
-      else if (ratio > 1.5) anomalyLevel = "Warning";
+      // Check if actual reading is outside Prophet confidence band
+      const isOutsideBand = forecast
+        ? anomaly.door_stable_ms > forecast.upper_bound_ms ||
+          anomaly.door_stable_ms < forecast.lower_bound_ms
+        : null;
 
       return {
-        room_id: event.room_id,
-        captured_at: event.captured_at,
-        hour: event.hour,
-        door_status: event.door_status,
-        motion_count: event.motion_count,
-        occupancy_stat: event.occupancy_stat,
+        room_id: anomaly.room_id,
+        captured_at: anomaly.captured_at,
+        hour: anomaly.hour,
 
-        door_stable_ms: actual,
-        door_stable_min: Number(durationMin.toFixed(2)),
+        // Isolation Forest output
+        status: anomaly.status,
+        reason: anomaly.reason,
+        severity: anomaly.severity,
+        anomaly_score: anomaly.anomaly_score,   // learned score, not hardcoded
 
-        expected_door_stable_ms: Math.round(expected),
-        expected_door_stable_min: Number((expected / 60000).toFixed(2)),
+        // Sensor readings
+        door_stable_ms: anomaly.door_stable_ms,
+        door_stable_min: anomaly.door_stable_min,
+        motion_count: anomaly.motion_count,
+        is_after_hours: anomaly.is_after_hours,
+        is_empty: anomaly.is_empty,
 
-        deviation_ms: Math.round(deviation),
-        deviation_min: Number((deviation / 60000).toFixed(2)),
+        // Prophet context (if available)
+        expected_door_stable_ms: forecast?.expected_door_stable_ms ?? null,
+        expected_door_stable_min: forecast?.expected_door_stable_min ?? null,
+        lower_bound_ms: forecast?.lower_bound_ms ?? null,
+        upper_bound_ms: forecast?.upper_bound_ms ?? null,
+        is_outside_prophet_band: isOutsideBand,
 
-        anomaly_ratio: Number(ratio.toFixed(2)),
-        anomaly_level: anomalyLevel,
-
-        risk_score: riskScore,
-        risk_level: riskLevel,
-        is_after_hours: isAfterHours,
-
-        reasons
+        // Makes ML origin explicit for the dashboard
+        model_name: "isolation_forest"
       };
     });
 
-    const filtered = anomalies
-      .filter((item) => item.anomaly_level !== "Normal" || item.risk_score >= 3)
-      .sort((a, b) => b.risk_score - a.risk_score || b.anomaly_ratio - a.anomaly_ratio);
+    res.json({ anomalies });
 
-    res.json({ anomalies: filtered });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
