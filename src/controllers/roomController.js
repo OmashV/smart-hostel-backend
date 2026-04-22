@@ -10,6 +10,7 @@ const WardenForecast = require("../models/WardenForecast");
 const WardenFeatureImportance = require("../models/WardenFeatureImportance");
 const WardenAnomaly = require("../models/WardenAnomaly");
 const WardenPattern = require("../models/WardenPattern");
+const OwnerFeatureImportance = require("../models/OwnerFeatureImportance");
 
 
 const TIMEZONE = "Asia/Colombo";
@@ -578,6 +579,144 @@ async function getWardenForecasts(req, res) {
     res.status(500).json({ message: error.message });
   }
 }
+async function getWardenInspectionQueue(req, res) {
+  try {
+    const rooms = await SensorReading.aggregate([
+      { $sort: { room_id: 1, captured_at: -1 } },
+      {
+        $group: {
+          _id: "$room_id",
+          latest: { $first: "$$ROOT" }
+        }
+      },
+      { $replaceRoot: { newRoot: "$latest" } },
+      {
+        $addFields: {
+          inspection_reasons: {
+            $concatArrays: [
+              {
+                $cond: [
+                  { $eq: ["$waste_stat", "Critical"] },
+                  ["Critical waste"],
+                  []
+                ]
+              },
+              {
+                $cond: [
+                  { $eq: ["$noise_stat", "Violation"] },
+                  ["Noise violation"],
+                  []
+                ]
+              },
+              {
+                $cond: [
+                  { $eq: ["$sensor_faults.pir", true] },
+                  ["PIR sensor fault"],
+                  []
+                ]
+              },
+              {
+                $cond: [
+                  { $eq: ["$sensor_faults.door", true] },
+                  ["Door sensor fault"],
+                  []
+                ]
+              },
+              {
+                $cond: [
+                  { $eq: ["$sensor_faults.sound", true] },
+                  ["Sound sensor fault"],
+                  []
+                ]
+              },
+              {
+                $cond: [
+                  { $eq: ["$sensor_faults.current", true] },
+                  ["Current sensor fault"],
+                  []
+                ]
+              }
+            ]
+          }
+        }
+      },
+      {
+        $match: {
+          $expr: { $gt: [{ $size: "$inspection_reasons" }, 0] }
+        }
+      },
+      {
+        $project: {
+          _id: 0,
+          room_id: 1,
+          occupancy_stat: 1,
+          noise_stat: 1,
+          waste_stat: 1,
+          current_amp: 1,
+          captured_at: 1,
+          inspection_reasons: 1
+        }
+      },
+      { $sort: { captured_at: -1 } }
+    ]);
+
+    res.json({ rooms });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
+async function getWardenNoiseTrend(req, res) {
+  try {
+    const days = Number(req.query.days || 7);
+
+    const now = new Date();
+    const start = new Date(now);
+    start.setDate(start.getDate() - (days - 1));
+    start.setHours(0, 0, 0, 0);
+
+    const trend = await SensorReading.aggregate([
+      {
+        $match: {
+          captured_at: { $gte: start }
+        }
+      },
+      {
+        $group: {
+          _id: {
+            $dateToString: {
+              format: "%Y-%m-%d",
+              date: "$captured_at",
+              timezone: TIMEZONE
+            }
+          },
+          warning_count: {
+            $sum: {
+              $cond: [{ $eq: ["$noise_stat", "Warning"] }, 1, 0]
+            }
+          },
+          violation_count: {
+            $sum: {
+              $cond: [{ $eq: ["$noise_stat", "Violation"] }, 1, 0]
+            }
+          }
+        }
+      },
+      { $sort: { _id: 1 } }
+    ]);
+
+    res.json({
+      days,
+      trend: trend.map((item) => ({
+        date: item._id,
+        warning_count: item.warning_count || 0,
+        violation_count: item.violation_count || 0
+      }))
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
 
 async function getOwnerFeatureImportance(req, res) {
   try {
@@ -815,5 +954,8 @@ module.exports = {
   getSecurityDoorEvents,
   getStudentOverview,
   getStudentEnergyHistory,
-  getStudentRecentAlerts
+  getStudentRecentAlerts,
+  getOwnerFeatureImportance,
+  getWardenInspectionQueue,
+  getWardenNoiseTrend
 };
