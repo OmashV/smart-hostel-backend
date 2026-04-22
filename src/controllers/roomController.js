@@ -404,76 +404,6 @@ async function getSecurityDoorEvents(req, res) {
   }
 }
 
-// ================= STUDENT =================
-
-async function getStudentOverview(req, res) {
-  try {
-    const { roomId } = req.params;
-
-    const latest = await SensorReading.findOne({ room_id: roomId }).sort({ captured_at: -1 });
-
-    if (!latest) {
-      return res.status(404).json({ message: "No data found for this room" });
-    }
-
-    const todaySriLanka = getSriLankaDateString();
-
-    const daily = await SensorReading.aggregate([
-      { $match: { room_id: roomId } },
-      buildDailyGroupStage(),
-      { $match: { _id: todaySriLanka } }
-    ]);
-
-    const today = daily[0];
-
-    res.json({
-      room_id: roomId,
-      current_status: {
-        occupancy_stat: latest.occupancy_stat,
-        noise_stat: latest.noise_stat,
-        waste_stat: latest.waste_stat,
-        door_status: latest.door_status,
-        current_amp: latest.current_amp,
-        captured_at: latest.captured_at
-      },
-      today_energy_kwh: Number(((today?.total_energy_kwh) || 0).toFixed(4)),
-      today_wasted_energy_kwh: Number(((today?.wasted_energy_kwh) || 0).toFixed(4))
-    });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
-}
-
-async function getStudentEnergyHistory(req, res) {
-  try {
-    return getDailyEnergyHistory(req, res);
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
-}
-
-async function getStudentRecentAlerts(req, res) {
-  try {
-    const { roomId } = req.params;
-    const limit = Number(req.query.limit || 20);
-
-    const alerts = await SensorReading.find({
-      room_id: roomId,
-      $or: [
-        { waste_stat: { $in: ["Warning", "Critical"] } },
-        { noise_stat: { $in: ["Warning", "Violation"] } }
-      ]
-    })
-      .sort({ captured_at: -1 })
-      .limit(limit)
-      .select("captured_at waste_stat noise_stat current_amp sound_peak door_status occupancy_stat");
-
-    res.json({ alerts });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
-}
-
 module.exports = {
   getLatestReading,
   getOwnerKpis,
@@ -485,8 +415,5 @@ module.exports = {
   getWardenNoiseIssues,
   getSecuritySummary,
   getSecuritySuspiciousRooms,
-  getSecurityDoorEvents,
-  getStudentOverview,
-  getStudentEnergyHistory,
-  getStudentRecentAlerts
+  getSecurityDoorEvents
 };

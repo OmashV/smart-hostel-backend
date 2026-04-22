@@ -10,10 +10,7 @@ const {
   getWardenNoiseIssues,
   getSecuritySummary,
   getSecuritySuspiciousRooms,
-  getSecurityDoorEvents,
-  getStudentOverview,
-  getStudentEnergyHistory,
-  getStudentRecentAlerts
+  getSecurityDoorEvents
 } = require("../controllers/roomController");
 
 const router = express.Router();
@@ -36,10 +33,5 @@ router.get("/warden/noise-issues", getWardenNoiseIssues);
 router.get("/security/summary", getSecuritySummary);
 router.get("/security/suspicious-rooms", getSecuritySuspiciousRooms);
 router.get("/security/door-events", getSecurityDoorEvents);
-
-// student
-router.get("/student/:roomId/overview", getStudentOverview);
-router.get("/student/:roomId/energy/history", getStudentEnergyHistory);
-router.get("/student/:roomId/alerts", getStudentRecentAlerts);
 
 module.exports = router;
