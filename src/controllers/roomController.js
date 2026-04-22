@@ -612,7 +612,15 @@ async function getOwnerAnomalies(req, res) {
 
 async function getSecuritySummary(req, res) {
   try {
-    const latestPerRoom = await SensorReading.aggregate([
+    const { roomId } = req.query;
+
+    const pipeline = [];
+
+    if (roomId) {
+      pipeline.push({ $match: { room_id: roomId } });
+    }
+
+    pipeline.push(
       { $sort: { room_id: 1, captured_at: -1 } },
       {
         $group: {
@@ -621,7 +629,9 @@ async function getSecuritySummary(req, res) {
         }
       },
       { $replaceRoot: { newRoot: "$latest" } }
-    ]);
+    );
+
+    const latestPerRoom = await SensorReading.aggregate(pipeline);
 
     const summary = {
       active_security_alerts: 0,
@@ -633,11 +643,13 @@ async function getSecuritySummary(req, res) {
 
     for (const room of latestPerRoom) {
       const isAfterHours = room.hour >= 23 || room.hour <= 5;
+
       const suspicious =
         (room.door_status === "Open" && room.door_stable_ms > 300000) ||
         (room.motion_count > 0 && isAfterHours);
 
       let riskScore = 0;
+
       if (room.door_status === "Open" && room.door_stable_ms > 1800000) riskScore += 3;
       else if (room.door_status === "Open" && room.door_stable_ms > 600000) riskScore += 2;
 
@@ -647,10 +659,12 @@ async function getSecuritySummary(req, res) {
 
       if (room.door_status === "Open") summary.door_open_rooms++;
       if (isAfterHours) summary.after_hours_events++;
+
       if (suspicious) {
         summary.suspicious_rooms++;
         summary.active_security_alerts++;
       }
+
       if (riskScore >= 4) summary.high_risk_rooms++;
     }
 
@@ -662,7 +676,15 @@ async function getSecuritySummary(req, res) {
 
 async function getSecuritySuspiciousRooms(req, res) {
   try {
-    const rooms = await SensorReading.aggregate([
+    const { roomId } = req.query;
+
+    const pipeline = [];
+
+    if (roomId) {
+      pipeline.push({ $match: { room_id: roomId } });
+    }
+
+    pipeline.push(
       { $sort: { room_id: 1, captured_at: -1 } },
       {
         $group: {
@@ -707,9 +729,10 @@ async function getSecuritySuspiciousRooms(req, res) {
           hour: 1,
           captured_at: 1
         }
-      },
-      { $sort: { room_id: 1 } }
-    ]);
+      }
+    );
+
+    const rooms = await SensorReading.aggregate(pipeline);
 
     res.json({ rooms });
   } catch (error) {
@@ -719,11 +742,18 @@ async function getSecuritySuspiciousRooms(req, res) {
 
 async function getSecurityDoorEvents(req, res) {
   try {
+    const { roomId } = req.query;
     const limit = Number(req.query.limit || 50);
 
-    const events = await SensorReading.find({
+    const query = {
       door_status: "Open"
-    })
+    };
+
+    if (roomId) {
+      query.room_id = roomId;
+    }
+
+    const events = await SensorReading.find(query)
       .sort({ captured_at: -1 })
       .limit(limit)
       .select("room_id captured_at door_status door_stable_ms motion_count hour minute second -_id");
