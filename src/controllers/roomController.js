@@ -746,6 +746,90 @@ async function getOwnerAnomalies(req, res) {
   }
 }
 
+const mongoose = require("mongoose");
+
+const getWardenHistory = async (req, res) => {
+  try {
+    const days = Math.max(parseInt(req.query.days || "7", 10), 1);
+    const roomId = req.query.roomId;
+
+    const db = mongoose.connection.db;
+    const collection = db.collection("warden_hourly_summary");
+
+    const end = new Date();
+    const start = new Date();
+    start.setDate(end.getDate() - (days - 1));
+    start.setHours(0, 0, 0, 0);
+
+    const match = {
+      date: {
+        $gte: start.toISOString().slice(0, 10),
+        $lte: end.toISOString().slice(0, 10)
+      }
+    };
+
+    if (roomId && roomId !== "All") {
+      match.room_id = roomId;
+    }
+
+    const results = await collection.aggregate([
+      { $match: match },
+      {
+        $group: {
+          _id: {
+            date: "$date",
+            ...(roomId && roomId !== "All" ? {} : { room_id: "$room_id" })
+          },
+          occupied_count: { $sum: { $ifNull: ["$occupied_count", 0] } },
+          empty_count: { $sum: { $ifNull: ["$empty_count", 0] } },
+          warning_count: { $sum: { $ifNull: ["$warning_count", 0] } },
+          violation_count: { $sum: { $ifNull: ["$violation_count", 0] } }
+        }
+      },
+      {
+        $project: {
+          _id: 0,
+          date: "$_id.date",
+          room_id: roomId && roomId !== "All" ? roomId : "$_id.room_id",
+          occupied_count: 1,
+          empty_count: 1,
+          warning_count: 1,
+          violation_count: 1
+        }
+      },
+      { $sort: { date: 1, room_id: 1 } }
+    ]).toArray();
+
+    if (roomId && roomId !== "All") {
+      return res.json({ items: results });
+    }
+
+    const byDate = {};
+    for (const row of results) {
+      if (!byDate[row.date]) {
+        byDate[row.date] = {
+          date: row.date,
+          occupied_count: 0,
+          empty_count: 0,
+          warning_count: 0,
+          violation_count: 0
+        };
+      }
+
+      byDate[row.date].occupied_count += row.occupied_count || 0;
+      byDate[row.date].empty_count += row.empty_count || 0;
+      byDate[row.date].warning_count += row.warning_count || 0;
+      byDate[row.date].violation_count += row.violation_count || 0;
+    }
+
+    return res.json({
+      items: Object.values(byDate).sort((a, b) => a.date.localeCompare(b.date))
+    });
+  } catch (error) {
+    console.error("getWardenHistory error:", error);
+    return res.status(500).json({ message: "Failed to load warden history" });
+  }
+};
 
 // ================= SECURITY =================
 async function getSecuritySummary(req, res) {
@@ -957,5 +1041,6 @@ module.exports = {
   getStudentRecentAlerts,
   getOwnerFeatureImportance,
   getWardenInspectionQueue,
-  getWardenNoiseTrend
+  getWardenNoiseTrend,
+  getWardenHistory
 };
