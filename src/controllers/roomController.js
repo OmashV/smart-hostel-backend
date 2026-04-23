@@ -770,92 +770,177 @@ async function getSecurityTrend(req, res) {
   try {
     const { roomId } = req.query;
 
-    // Step 1: Pull Prophet forecasts from ML collection
+    // ── Step 1: Today's date range in Colombo timezone ─────────────────────
+    const today = new Date().toLocaleDateString("en-CA", {
+      timeZone: "Asia/Colombo"
+    });
+
+    const todayStart = new Date(`${today}T00:00:00+05:30`);
+    const todayEnd   = new Date(`${today}T23:59:59+05:30`);
+
+    // ── Step 2a: Today's actual readings ───────────────────────────────────
+    const actualMatch = {
+      door_stable_ms: { $gt: 0 },
+      captured_at: { $gte: todayStart, $lte: todayEnd }
+    };
+    if (roomId) actualMatch.room_id = roomId;
+
+    const actualReadings = await SensorReading.aggregate([
+      { $match: actualMatch },
+      {
+        $group: {
+          _id: {
+            $hour: { date: "$captured_at", timezone: "Asia/Colombo" }
+          },
+          actual_door_stable_ms: { $avg: "$door_stable_ms" },
+          sample_count:          { $sum: 1 },
+          latest_captured_at:    { $max: "$captured_at" }
+        }
+      }
+    ]);
+
+    // ── Step 2b: Historical fallback — all-time average per hour ───────────
+    const historicalMatch = { door_stable_ms: { $gt: 0 } };
+    if (roomId) historicalMatch.room_id = roomId;
+
+    const historicalReadings = await SensorReading.aggregate([
+      { $match: historicalMatch },
+      {
+        $group: {
+          _id: {
+            $hour: { date: "$captured_at", timezone: "Asia/Colombo" }
+          },
+          historical_avg_ms: { $avg: "$door_stable_ms" }
+        }
+      }
+    ]);
+
+    // ── Step 2c: Build lookup maps ─────────────────────────────────────────
+    const actualMap = {};
+    actualReadings.forEach((item) => {
+      actualMap[item._id] = item;
+    });
+
+    const historicalMap = {};
+    historicalReadings.forEach((item) => {
+      historicalMap[item._id] = item.historical_avg_ms;
+    });
+
+    // ── Step 3: Pull Prophet forecasts ─────────────────────────────────────
     const forecastQuery = { model_name: "prophet" };
     if (roomId) forecastQuery.room_id = roomId;
 
     const forecasts = await SecurityForecast.find(forecastQuery)
       .sort({ hour: 1 })
-      .select("room_id hour hour_label expected_door_stable_ms expected_door_stable_min lower_bound_ms upper_bound_ms -_id")
       .lean();
 
-    if (!forecasts.length) {
-      return res.json({ trend: [], summary: { room_id: roomId || "ALL" } });
-    }
+    // ── Step 4: Get current hour in Colombo timezone ───────────────────────
+    const currentHour = Number(
+      new Intl.DateTimeFormat("en-US", {
+        timeZone: "Asia/Colombo",
+        hour: "numeric",
+        hour12: false
+      }).format(new Date())
+    );
 
-    // Step 2: Pull recent actual readings grouped by hour
-    const baseMatch = {
-      door_status: "Open",
-      door_stable_ms: { $gt: 0, $lt: 3600000 },
-      time_valid: true,
-      "sensor_faults.door": false,
-      "sensor_health.door": true
-    };
-    if (roomId) baseMatch.room_id = roomId;
+    // ── Step 5: Build hour base — full 24 hours for expected line ──────────
+    const hours = forecasts.length
+      ? forecasts
+      : Array.from({ length: 24 }, (_, i) => ({
+          hour: i,
+          hour_label: `${i}:00`,
+          expected_door_stable_ms:  null,
+          expected_door_stable_min: null,
+          lower_bound_ms: null,
+          upper_bound_ms: null
+        }));
 
-    const recentActual = await SensorReading.aggregate([
-      { $match: baseMatch },
-      { $sort: { captured_at: -1 } },
-      { $limit: 200 },
-      {
-        $group: {
-          _id: "$hour",
-          actual_door_stable_ms: { $avg: "$door_stable_ms" },
-          recent_samples: { $sum: 1 }
+    // ── Step 5: Merge everything into trend array ───────────────────────────
+   const trend = hours.map((forecast) => {
+      const hour   = forecast.hour;
+      const isFutureHour = hour > currentHour;   // ← key check
+
+      const actual = actualMap[hour];
+
+      // Future hours — no actual data regardless of what's in the map
+      const isLiveData = !isFutureHour && !!actual;
+      const actualMs = isFutureHour
+        ? null                                    // ← null for future hours
+        : actual
+        ? Math.round(actual.actual_door_stable_ms)
+        : historicalMap[hour]
+        ? Math.round(historicalMap[hour])
+        : null;
+
+      const expectedMs = forecast.expected_door_stable_ms
+        ? Math.round(forecast.expected_door_stable_ms)
+        : null;
+
+      const deviationMs = actualMs != null && expectedMs != null
+        ? actualMs - expectedMs
+        : null;
+
+      // Trend status — only when both values are present and it's live data
+      let trend_status = "No Data";
+      if (actualMs != null && expectedMs != null) {
+        if (!isLiveData) {
+          trend_status = "Historical Average";
+        } else if (actualMs > forecast.upper_bound_ms) {
+          trend_status = "Above Expected (Anomalous)";
+        } else if (actualMs < forecast.lower_bound_ms) {
+          trend_status = "Below Expected (Anomalous)";
+        } else if (actualMs > expectedMs) {
+          trend_status = "Above Expected (Normal Range)";
+        } else if (actualMs < expectedMs) {
+          trend_status = "Below Expected (Normal Range)";
+        } else {
+          trend_status = "Normal";
         }
       }
-    ]);
-
-    // Step 3: Map actual results by hour for easy lookup
-    const actualMap = {};
-    recentActual.forEach((item) => {
-      actualMap[item._id] = item;
-    });
-
-    // Step 4: Merge Prophet forecast with actual readings
-    const trend = forecasts.map((forecast) => {
-      const actual = actualMap[forecast.hour];
-      const actualMs = Math.round(actual?.actual_door_stable_ms || 0);
-      const expectedMs = Math.round(forecast.expected_door_stable_ms || 0);
-      const deviationMs = actualMs - expectedMs;
-
-      // Use Prophet confidence bands to determine status
-      // This replaces the old simple above/below check
-      let trend_status = "Normal";
-      if (actualMs > forecast.upper_bound_ms) trend_status = "Above Expected (Anomalous)";
-      else if (actualMs < forecast.lower_bound_ms) trend_status = "Below Expected (Anomalous)";
-      else if (actualMs > expectedMs) trend_status = "Above Expected (Normal Range)";
-      else if (actualMs < expectedMs) trend_status = "Below Expected (Normal Range)";
 
       return {
-        hour: forecast.hour,
-        hour_label: forecast.hour_label,
+        hour,
+        hour_label:  forecast.hour_label || `${hour}:00`,
+        date:        today,
+
+        // Actual — live today or historical fallback
+        actual_door_stable_ms:  actualMs,
+        actual_door_stable_min: actualMs != null
+          ? Number((actualMs / 60000).toFixed(2))
+          : null,
+        is_live_data:       isLiveData,
+        sample_count:       actual?.sample_count || 0,
+        latest_captured_at: actual?.latest_captured_at || null,
 
         // Prophet ML values
-        expected_door_stable_ms: expectedMs,
-        expected_door_stable_min: forecast.expected_door_stable_min,
-        lower_bound_ms: Math.round(forecast.lower_bound_ms),
-        upper_bound_ms: Math.round(forecast.upper_bound_ms),
+        expected_door_stable_ms:  expectedMs,
+        expected_door_stable_min: expectedMs != null
+          ? Number((expectedMs / 60000).toFixed(2))
+          : null,
+        lower_bound_ms: forecast.lower_bound_ms
+          ? Math.round(forecast.lower_bound_ms)
+          : null,
+        upper_bound_ms: forecast.upper_bound_ms
+          ? Math.round(forecast.upper_bound_ms)
+          : null,
 
-        // Actual sensor readings
-        actual_door_stable_ms: actualMs,
-        actual_door_stable_min: Number((actualMs / 60000).toFixed(2)),
-        recent_samples: actual?.recent_samples || 0,
-
-        // Deviation from ML forecast
-        deviation_ms: deviationMs,
-        deviation_min: Number((deviationMs / 60000).toFixed(2)),
+        // Deviation
+        deviation_ms:  deviationMs,
+        deviation_min: deviationMs != null
+          ? Number((deviationMs / 60000).toFixed(2))
+          : null,
 
         trend_status,
-        model_name: "prophet"           // makes ML origin visible in the dashboard
+        model_name: "prophet"
       };
     });
 
     res.json({
       summary: {
-        room_id: roomId || "ALL",
+        room_id:       roomId || "ALL",
+        date:          today,
         hours_covered: trend.length,
-        model_name: "prophet"
+        model_name:    "prophet"
       },
       trend
     });
