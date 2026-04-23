@@ -3,6 +3,7 @@ const DailyFloorSummary = require("../models/DailyFloorSummary");
 const OwnerAlert = require("../models/OwnerAlert");
 const OwnerAnomaly = require("../models/OwnerAnomaly");
 const OwnerForecast = require("../models/OwnerForecast");
+const OwnerWeekdayPattern = require("../models/OwnerWeekdayPattern");
 
 async function getLatestSummaryDate() {
   const latest = await DailyRoomSummary.findOne({}).sort({ date: -1 }).lean();
@@ -145,10 +146,82 @@ async function getRoomDetail({ roomId }) {
   };
 }
 
+async function getWastePatternByWeekday({ roomId }) {
+  if (!roomId || roomId === "all") {
+    return { error: "roomId is required for weekday pattern lookup" };
+  }
+
+  const items = await OwnerWeekdayPattern.find({ room_id: roomId }).lean();
+
+  const weekdayOrder = {
+    Monday: 1,
+    Tuesday: 2,
+    Wednesday: 3,
+    Thursday: 4,
+    Friday: 5,
+    Saturday: 6,
+    Sunday: 7
+  };
+
+  items.sort((a, b) => {
+    const dayA = weekdayOrder[a.weekday_name] || 99;
+    const dayB = weekdayOrder[b.weekday_name] || 99;
+    return dayA - dayB;
+  });
+
+  return {
+    room_id: roomId,
+    weekday_patterns: items.map((item) => ({
+      weekday_name: item.weekday_name,
+      day_type: item.day_type,
+      usual_pattern: item.usual_pattern,
+      avg_total_energy_kwh: Number(item.avg_total_energy_kwh || 0),
+      avg_wasted_energy_kwh: Number(item.avg_wasted_energy_kwh || 0),
+      avg_waste_ratio_percent: Number(item.avg_waste_ratio_percent || 0),
+      days_count: Number(item.days_count || 0)
+    }))
+  };
+}
+
+async function getActiveAlerts({ floorId = "all", roomId = "all", limit = 10 }) {
+  const query = {
+    is_deleted: false,
+    status: "active"
+  };
+
+  if (roomId && roomId !== "all") {
+    query.room_id = roomId;
+  }
+
+  let alerts = await OwnerAlert.find(query)
+    .sort({ date: -1, createdAt: -1 })
+    .limit(Number(limit) || 10)
+    .lean();
+
+  if (floorId && floorId !== "all") {
+    const allowedRooms = await DailyRoomSummary.distinct("room_id", {
+      floor_id: floorId
+    });
+    alerts = alerts.filter((a) => allowedRooms.includes(a.room_id));
+  }
+
+  return {
+    alerts: alerts.map((a) => ({
+      room_id: a.room_id,
+      date: a.date,
+      severity: a.severity,
+      title: a.title,
+      message: a.message
+    }))
+  };
+}
+
 module.exports = {
   getLatestSummaryDate,
   getFloorOverview,
   getRoomsOverview,
   getTopWasteRoomsToday,
-  getRoomDetail
+  getRoomDetail,
+  getWastePatternByWeekday,
+  getActiveAlerts
 };

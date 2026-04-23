@@ -3,14 +3,18 @@ const {
   getFloorOverview,
   getRoomsOverview,
   getTopWasteRoomsToday,
-  getRoomDetail
+  getRoomDetail,
+  getWastePatternByWeekday,
+  getActiveAlerts
 } = require("./ownerChatTools");
 
 const TOOL_IMPL = {
   get_floor_overview: getFloorOverview,
   get_rooms_overview: getRoomsOverview,
   get_top_waste_rooms_today: getTopWasteRoomsToday,
-  get_room_detail: getRoomDetail
+  get_room_detail: getRoomDetail,
+  get_waste_pattern_by_weekday: getWastePatternByWeekday,
+  get_active_alerts: getActiveAlerts
 };
 
 const TOOLS = [
@@ -94,6 +98,49 @@ const TOOLS = [
         required: ["roomId"]
       }
     }
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_waste_pattern_by_weekday",
+      description:
+        "Get weekday-based waste pattern discovery for a specific room, including which weekdays usually have high waste, moderate waste, or efficient usage.",
+      parameters: {
+        type: "object",
+        properties: {
+          roomId: {
+            type: "string",
+            description: "Room id like A101 or A202"
+          }
+        },
+        required: ["roomId"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_active_alerts",
+      description:
+        "Get active owner alerts, optionally filtered by floor or room, for dashboard monitoring and drill-down.",
+      parameters: {
+        type: "object",
+        properties: {
+          floorId: {
+            type: "string",
+            description: 'Floor id like "A-Floor-1" or "all"'
+          },
+          roomId: {
+            type: "string",
+            description: 'Room id like "A101" or "all"'
+          },
+          limit: {
+            type: "number",
+            description: "Maximum number of alerts to return"
+          }
+        }
+      }
+    }
   }
 ];
 
@@ -101,21 +148,27 @@ function systemPrompt() {
   return `
 You are a Smart Hostel dashboard analytics assistant for the OWNER role.
 
-Your job:
-1. Answer natural language questions about the dashboard data.
-2. Help the user explore the dashboard.
-3. Explain trends, comparisons, anomalies, and forecasts.
-4. Support decision-oriented questions using the provided tool results.
+You answer questions using dashboard tools, not guesses.
+
+You can help with:
+1. Floor-wise energy and waste comparison
+2. Room-wise comparison within a floor
+3. Highest waste rooms for the latest day
+4. Room detail, trends, alerts, anomalies, and forecast
+5. Weekday-based waste patterns for a room
+6. Dashboard guidance and drill-down suggestions
 
 Rules:
 - Always use tools when data is needed.
-- Never claim that only one room exists unless the tool result actually shows only one room.
+- Use the current dashboard state when helpful.
+- Never say only one room exists unless the tool result actually shows only one room.
 - Never invent values.
+- If the user asks about weekday patterns, use the weekday-pattern tool.
 - If navigation would help, include action lines exactly like:
 ACTION: switch_floor=A-Floor-1
-ACTION: switch_room=A201
+ACTION: switch_room=A101
 - Ignore null or missing IDs in navigation suggestions.
-- Be clear and practical.
+- Keep answers practical and tied to the dashboard.
 `;
 }
 
@@ -188,6 +241,20 @@ ${message}`
 
     if (toolName === "get_room_detail" && !parsedArgs.roomId && roomId !== "all") {
       parsedArgs.roomId = roomId;
+    }
+
+    if (toolName === "get_waste_pattern_by_weekday" && !parsedArgs.roomId && roomId !== "all") {
+      parsedArgs.roomId = roomId;
+    }
+
+    if (toolName === "get_active_alerts") {
+      if (!parsedArgs.floorId) {
+        parsedArgs.floorId = floorId;
+      }
+
+      if (!parsedArgs.roomId) {
+        parsedArgs.roomId = roomId;
+      }
     }
 
     const impl = TOOL_IMPL[toolName];
