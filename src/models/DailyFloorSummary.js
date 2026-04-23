@@ -1,8 +1,7 @@
 const mongoose = require("mongoose");
 
-const DailyRoomSummarySchema = new mongoose.Schema(
+const DailyFloorSummarySchema = new mongoose.Schema(
   {
-    room_id: { type: String, required: true, index: true },
     floor_id: { type: String, required: true, index: true },
     date: { type: String, required: true, index: true },
 
@@ -13,18 +12,18 @@ const DailyRoomSummarySchema = new mongoose.Schema(
     avg_current: { type: Number, default: 0 },
     total_motion_count: { type: Number, default: 0 },
     avg_sound_peak: { type: Number, default: 0 },
-    door_open_count: { type: Number, default: 0 },
 
-    critical_count: { type: Number, default: 0 },
-    warning_count: { type: Number, default: 0 }
+    rooms_count: { type: Number, default: 0 },
+    critical_rooms_count: { type: Number, default: 0 },
+    warning_rooms_count: { type: Number, default: 0 }
   },
   { timestamps: true }
 );
 
-DailyRoomSummarySchema.index({ room_id: 1, date: 1 }, { unique: true });
+DailyFloorSummarySchema.index({ floor_id: 1, date: 1 }, { unique: true });
 
 module.exports = mongoose.model(
-  "DailyRoomSummary",
-  DailyRoomSummarySchema,
-  "daily_room_summary"
+  "DailyFloorSummary",
+  DailyFloorSummarySchema,
+  "daily_floor_summary"
 );
