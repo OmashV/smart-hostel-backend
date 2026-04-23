@@ -8,7 +8,10 @@
     "dev": "nodemon server.js",
     "start": "node server.js",
     "build:daily-summary": "node scripts/buildDailySummary.js",
-    "build:hourly-summary": "node scripts/buildHourlySummary.js"
+    "build:hourly-summary": "node scripts/buildHourlySummary.js",
+    "generate:synthetic-daily": "node scripts/generateSyntheticDailyRooms.js",
+    "build:daily-floor-summary": "node scripts/buildDailyFloorSummary.js",
+    "backfill:daily-floorid": "node scripts/backfillFloorIdToDailyRoomSummary.js"
   },
   "dependencies": {
     "cors": "^2.8.5",

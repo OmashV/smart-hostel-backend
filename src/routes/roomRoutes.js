@@ -1,6 +1,9 @@
 const express = require("express");
 const {
   getLatestReading,
+  getAvailableFloors,
+  getAvailableRooms,
+  getFloorOverview,
   getOwnerKpis,
   getOwnerAnomalies,
   getOwnerPatterns,
@@ -30,6 +33,9 @@ const {
 const router = express.Router();
 
 // shared
+router.get("/available-floors", getAvailableFloors);
+router.get("/available-rooms", getAvailableRooms);
+router.get("/floors/overview", getFloorOverview);
 router.get("/:roomId/latest-reading", getLatestReading);
 
 // owner
