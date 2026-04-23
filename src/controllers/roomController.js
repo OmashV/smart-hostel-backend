@@ -10,6 +10,7 @@ const WardenForecast = require("../models/WardenForecast");
 const WardenFeatureImportance = require("../models/WardenFeatureImportance");
 const WardenAnomaly = require("../models/WardenAnomaly");
 const WardenPattern = require("../models/WardenPattern");
+const OwnerFeatureImportance = require("../models/OwnerFeatureImportance");
 
 
 const TIMEZONE = "Asia/Colombo";
@@ -83,6 +84,101 @@ async function getLatestReading(req, res) {
 }
 
 // ================= OWNER =================
+
+async function getOwnerWeekdayPatterns(req, res) {
+  try {
+    const { roomId } = req.query;
+
+    const query = {};
+    if (roomId) {
+      query.room_id = roomId;
+    }
+
+    const weekdayOrder = {
+      Monday: 1,
+      Tuesday: 2,
+      Wednesday: 3,
+      Thursday: 4,
+      Friday: 5,
+      Saturday: 6,
+      Sunday: 7
+    };
+
+    const items = await OwnerWeekdayPattern.find(query).lean();
+
+    items.sort((a, b) => {
+      const dayA = weekdayOrder[a.weekday_name] || 99;
+      const dayB = weekdayOrder[b.weekday_name] || 99;
+      return dayA - dayB;
+    });
+
+    res.json({ items });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
+async function getOwnerKpis(req, res) {
+  try {
+    const { roomId } = req.params;
+
+    const now = new Date();
+
+    const startOfDay = new Date(now);
+    startOfDay.setHours(0, 0, 0, 0);
+
+    const endOfDay = new Date(now);
+    endOfDay.setHours(23, 59, 59, 999);
+
+    const todayAgg = await SensorReading.aggregate([
+      {
+        $match: {
+          room_id: roomId,
+          captured_at: {
+            $gte: startOfDay,
+            $lte: endOfDay
+          }
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          total_energy_kwh: { $sum: "$interval_energy_kwh" },
+          wasted_energy_kwh: { $sum: "$interval_wasted_energy_kwh" }
+        }
+      }
+    ]);
+
+    const totalEnergy =
+      todayAgg.length > 0 ? Number(todayAgg[0].total_energy_kwh || 0) : 0;
+
+    const wastedEnergy =
+      todayAgg.length > 0 ? Number(todayAgg[0].wasted_energy_kwh || 0) : 0;
+
+    const wasteRatio =
+      totalEnergy > 0
+        ? Number(((wastedEnergy / totalEnergy) * 100).toFixed(2))
+        : 0;
+
+    const latest = await SensorReading.findOne({ room_id: roomId })
+      .sort({ captured_at: -1 })
+      .lean();
+
+    const currentWasteStatus =
+      latest?.waste_stat ||
+      (wasteRatio >= 30 ? "Critical" : wasteRatio >= 15 ? "Warning" : "Normal");
+
+    res.json({
+      room_id: roomId,
+      total_energy_today_kwh: Number(totalEnergy.toFixed(4)),
+      wasted_energy_today_kwh: Number(wastedEnergy.toFixed(4)),
+      waste_ratio_today_percent: Number(wasteRatio.toFixed(2)),
+      current_waste_status: currentWasteStatus
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
 
 async function getOwnerWeekdayPatterns(req, res) {
   try {
@@ -578,6 +674,144 @@ async function getWardenForecasts(req, res) {
     res.status(500).json({ message: error.message });
   }
 }
+async function getWardenInspectionQueue(req, res) {
+  try {
+    const rooms = await SensorReading.aggregate([
+      { $sort: { room_id: 1, captured_at: -1 } },
+      {
+        $group: {
+          _id: "$room_id",
+          latest: { $first: "$$ROOT" }
+        }
+      },
+      { $replaceRoot: { newRoot: "$latest" } },
+      {
+        $addFields: {
+          inspection_reasons: {
+            $concatArrays: [
+              {
+                $cond: [
+                  { $eq: ["$waste_stat", "Critical"] },
+                  ["Critical waste"],
+                  []
+                ]
+              },
+              {
+                $cond: [
+                  { $eq: ["$noise_stat", "Violation"] },
+                  ["Noise violation"],
+                  []
+                ]
+              },
+              {
+                $cond: [
+                  { $eq: ["$sensor_faults.pir", true] },
+                  ["PIR sensor fault"],
+                  []
+                ]
+              },
+              {
+                $cond: [
+                  { $eq: ["$sensor_faults.door", true] },
+                  ["Door sensor fault"],
+                  []
+                ]
+              },
+              {
+                $cond: [
+                  { $eq: ["$sensor_faults.sound", true] },
+                  ["Sound sensor fault"],
+                  []
+                ]
+              },
+              {
+                $cond: [
+                  { $eq: ["$sensor_faults.current", true] },
+                  ["Current sensor fault"],
+                  []
+                ]
+              }
+            ]
+          }
+        }
+      },
+      {
+        $match: {
+          $expr: { $gt: [{ $size: "$inspection_reasons" }, 0] }
+        }
+      },
+      {
+        $project: {
+          _id: 0,
+          room_id: 1,
+          occupancy_stat: 1,
+          noise_stat: 1,
+          waste_stat: 1,
+          current_amp: 1,
+          captured_at: 1,
+          inspection_reasons: 1
+        }
+      },
+      { $sort: { captured_at: -1 } }
+    ]);
+
+    res.json({ rooms });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
+async function getWardenNoiseTrend(req, res) {
+  try {
+    const days = Number(req.query.days || 7);
+
+    const now = new Date();
+    const start = new Date(now);
+    start.setDate(start.getDate() - (days - 1));
+    start.setHours(0, 0, 0, 0);
+
+    const trend = await SensorReading.aggregate([
+      {
+        $match: {
+          captured_at: { $gte: start }
+        }
+      },
+      {
+        $group: {
+          _id: {
+            $dateToString: {
+              format: "%Y-%m-%d",
+              date: "$captured_at",
+              timezone: TIMEZONE
+            }
+          },
+          warning_count: {
+            $sum: {
+              $cond: [{ $eq: ["$noise_stat", "Warning"] }, 1, 0]
+            }
+          },
+          violation_count: {
+            $sum: {
+              $cond: [{ $eq: ["$noise_stat", "Violation"] }, 1, 0]
+            }
+          }
+        }
+      },
+      { $sort: { _id: 1 } }
+    ]);
+
+    res.json({
+      days,
+      trend: trend.map((item) => ({
+        date: item._id,
+        warning_count: item.warning_count || 0,
+        violation_count: item.violation_count || 0
+      }))
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
 
 async function getOwnerFeatureImportance(req, res) {
   try {
@@ -607,9 +841,92 @@ async function getOwnerAnomalies(req, res) {
   }
 }
 
+const mongoose = require("mongoose");
+
+const getWardenHistory = async (req, res) => {
+  try {
+    const days = Math.max(parseInt(req.query.days || "7", 10), 1);
+    const roomId = req.query.roomId;
+
+    const db = mongoose.connection.db;
+    const collection = db.collection("warden_hourly_summary");
+
+    const end = new Date();
+    const start = new Date();
+    start.setDate(end.getDate() - (days - 1));
+    start.setHours(0, 0, 0, 0);
+
+    const match = {
+      date: {
+        $gte: start.toISOString().slice(0, 10),
+        $lte: end.toISOString().slice(0, 10)
+      }
+    };
+
+    if (roomId && roomId !== "All") {
+      match.room_id = roomId;
+    }
+
+    const results = await collection.aggregate([
+      { $match: match },
+      {
+        $group: {
+          _id: {
+            date: "$date",
+            ...(roomId && roomId !== "All" ? {} : { room_id: "$room_id" })
+          },
+          occupied_count: { $sum: { $ifNull: ["$occupied_count", 0] } },
+          empty_count: { $sum: { $ifNull: ["$empty_count", 0] } },
+          warning_count: { $sum: { $ifNull: ["$warning_count", 0] } },
+          violation_count: { $sum: { $ifNull: ["$violation_count", 0] } }
+        }
+      },
+      {
+        $project: {
+          _id: 0,
+          date: "$_id.date",
+          room_id: roomId && roomId !== "All" ? roomId : "$_id.room_id",
+          occupied_count: 1,
+          empty_count: 1,
+          warning_count: 1,
+          violation_count: 1
+        }
+      },
+      { $sort: { date: 1, room_id: 1 } }
+    ]).toArray();
+
+    if (roomId && roomId !== "All") {
+      return res.json({ items: results });
+    }
+
+    const byDate = {};
+    for (const row of results) {
+      if (!byDate[row.date]) {
+        byDate[row.date] = {
+          date: row.date,
+          occupied_count: 0,
+          empty_count: 0,
+          warning_count: 0,
+          violation_count: 0
+        };
+      }
+
+      byDate[row.date].occupied_count += row.occupied_count || 0;
+      byDate[row.date].empty_count += row.empty_count || 0;
+      byDate[row.date].warning_count += row.warning_count || 0;
+      byDate[row.date].violation_count += row.violation_count || 0;
+    }
+
+    return res.json({
+      items: Object.values(byDate).sort((a, b) => a.date.localeCompare(b.date))
+    });
+  } catch (error) {
+    console.error("getWardenHistory error:", error);
+    return res.status(500).json({ message: "Failed to load warden history" });
+  }
+};
 
 // ================= SECURITY =================
-
 async function getSecuritySummary(req, res) {
   try {
     const latestPerRoom = await SensorReading.aggregate([
@@ -795,6 +1112,7 @@ module.exports = {
   getLatestReading,
   getOwnerKpis,
   getOwnerWeekdayPatterns,
+  getOwnerWeekdayPatterns,
   getOwnerAnomalies,
   getOwnerPatterns,
   getOwnerForecasts,
@@ -816,5 +1134,9 @@ module.exports = {
   getSecurityDoorEvents,
   getStudentOverview,
   getStudentEnergyHistory,
-  getStudentRecentAlerts
+  getStudentRecentAlerts,
+  getOwnerFeatureImportance,
+  getWardenInspectionQueue,
+  getWardenNoiseTrend,
+  getWardenHistory
 };
