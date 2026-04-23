@@ -34,6 +34,11 @@ function startScheduler() {
   cron.schedule("5 * * * *", () => {
     runCommand("py ml/owner_analysis.py", "Run Owner ML Analysis");
   });
+
+  // every hour, 10 minutes later -> Security ML analysis
+  cron.schedule("10 * * * *", () => {
+  runCommand("py ml/security_analysis.py", "Run Security ML Analysis");
+});
 }
 
 module.exports = { startScheduler };
