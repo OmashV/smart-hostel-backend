@@ -16,6 +16,20 @@ const SecurityAnomaly = require("../models/SecurityAnomaly");
 
 const TIMEZONE = "Asia/Colombo";
 
+function deriveFloorIdFromRoom(roomId = "") {
+  const clean = String(roomId).trim().toUpperCase();
+
+  if (/^[A-Z]1\d{2}$/.test(clean)) {
+    return `${clean[0]}-Floor-1`;
+  }
+
+  if (/^[A-Z]2\d{2}$/.test(clean)) {
+    return `${clean[0]}-Floor-2`;
+  }
+
+  return "Unknown Floor";
+}
+
 function getSriLankaDateParts(date = new Date()) {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: TIMEZONE,
@@ -277,7 +291,7 @@ async function getOwnerRoomsOverview(req, res) {
 
       return {
         room_id: row.room_id,
-        floor_id: row.floor_id,
+        floor_id: row.floor_id || deriveFloorIdFromRoom(row.room_id),
         occupancy_stat: "Unknown",
         noise_stat: "Compliant",
         waste_stat:
