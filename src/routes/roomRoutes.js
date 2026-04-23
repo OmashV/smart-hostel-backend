@@ -39,7 +39,6 @@ router.get("/:roomId/latest-reading", getLatestReading);
 router.get("/:roomId/owner-kpis", getOwnerKpis);
 router.get("/:roomId/energy/history", getDailyEnergyHistory);
 router.get("/:roomId/energy/forecast", getEnergyForecast);
-router.get("/owner/feature-importance", getOwnerFeatureImportance);
 router.get("/owner/anomalies", getOwnerAnomalies);
 router.get("/owner/patterns", getOwnerPatterns);
 router.get("/owner/forecasts", getOwnerForecasts);
