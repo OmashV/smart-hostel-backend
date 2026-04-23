@@ -10,6 +10,8 @@ const WardenForecast = require("../models/WardenForecast");
 const WardenFeatureImportance = require("../models/WardenFeatureImportance");
 const WardenAnomaly = require("../models/WardenAnomaly");
 const WardenPattern = require("../models/WardenPattern");
+const SecurityForecast = require("../models/SecurityForecast");
+const SecurityAnomaly = require("../models/SecurityAnomaly");
 
 
 const TIMEZONE = "Asia/Colombo";
@@ -743,7 +745,15 @@ async function getOwnerAnomalies(req, res) {
 // ================= SECURITY =================
 async function getSecuritySummary(req, res) {
   try {
-    const latestPerRoom = await SensorReading.aggregate([
+    const { roomId } = req.query;
+
+    const pipeline = [];
+
+    if (roomId) {
+      pipeline.push({ $match: { room_id: roomId } });
+    }
+
+    pipeline.push(
       { $sort: { room_id: 1, captured_at: -1 } },
       {
         $group: {
@@ -752,24 +762,43 @@ async function getSecuritySummary(req, res) {
         }
       },
       { $replaceRoot: { newRoot: "$latest" } }
-    ]);
+    );
+
+    const latestPerRoom = await SensorReading.aggregate(pipeline);
 
     const summary = {
       active_security_alerts: 0,
       suspicious_rooms: 0,
-      door_open_rooms: 0
+      door_open_rooms: 0,
+      high_risk_rooms: 0,
+      after_hours_events: 0
     };
 
     for (const room of latestPerRoom) {
+      const isAfterHours = room.hour >= 23 || room.hour <= 5;
+
       const suspicious =
         (room.door_status === "Open" && room.door_stable_ms > 300000) ||
-        (room.motion_count > 0 && (room.hour >= 23 || room.hour <= 5));
+        (room.motion_count > 0 && isAfterHours);
+
+      let riskScore = 0;
+
+      if (room.door_status === "Open" && room.door_stable_ms > 1800000) riskScore += 3;
+      else if (room.door_status === "Open" && room.door_stable_ms > 600000) riskScore += 2;
+
+      if (room.motion_count === 0) riskScore += 1;
+      if (isAfterHours) riskScore += 2;
+      if (room.occupancy_stat === "Empty") riskScore += 2;
 
       if (room.door_status === "Open") summary.door_open_rooms++;
+      if (isAfterHours) summary.after_hours_events++;
+
       if (suspicious) {
         summary.suspicious_rooms++;
         summary.active_security_alerts++;
       }
+
+      if (riskScore >= 4) summary.high_risk_rooms++;
     }
 
     res.json(summary);
@@ -780,7 +809,15 @@ async function getSecuritySummary(req, res) {
 
 async function getSecuritySuspiciousRooms(req, res) {
   try {
-    const rooms = await SensorReading.aggregate([
+    const { roomId } = req.query;
+
+    const pipeline = [];
+
+    if (roomId) {
+      pipeline.push({ $match: { room_id: roomId } });
+    }
+
+    pipeline.push(
       { $sort: { room_id: 1, captured_at: -1 } },
       {
         $group: {
@@ -825,9 +862,10 @@ async function getSecuritySuspiciousRooms(req, res) {
           hour: 1,
           captured_at: 1
         }
-      },
-      { $sort: { room_id: 1 } }
-    ]);
+      }
+    );
+
+    const rooms = await SensorReading.aggregate(pipeline);
 
     res.json({ rooms });
   } catch (error) {
@@ -837,16 +875,287 @@ async function getSecuritySuspiciousRooms(req, res) {
 
 async function getSecurityDoorEvents(req, res) {
   try {
+    const { roomId } = req.query;
     const limit = Number(req.query.limit || 50);
 
-    const events = await SensorReading.find({
+    const query = {
       door_status: "Open"
-    })
+    };
+
+    if (roomId) {
+      query.room_id = roomId;
+    }
+
+    const events = await SensorReading.find(query)
       .sort({ captured_at: -1 })
       .limit(limit)
       .select("room_id captured_at door_status door_stable_ms motion_count hour minute second -_id");
 
     res.json({ events });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
+async function getSecurityTrend(req, res) {
+  try {
+    const { roomId } = req.query;
+
+    // ── Step 1: Today's date range in Colombo timezone ─────────────────────
+    const today = new Date().toLocaleDateString("en-CA", {
+      timeZone: "Asia/Colombo"
+    });
+
+    const todayStart = new Date(`${today}T00:00:00+05:30`);
+    const todayEnd   = new Date(`${today}T23:59:59+05:30`);
+
+    // ── Step 2a: Today's actual readings ───────────────────────────────────
+    const actualMatch = {
+      door_stable_ms: { $gt: 0 },
+      captured_at: { $gte: todayStart, $lte: todayEnd }
+    };
+    if (roomId) actualMatch.room_id = roomId;
+
+    const actualReadings = await SensorReading.aggregate([
+      { $match: actualMatch },
+      {
+        $group: {
+          _id: {
+            $hour: { date: "$captured_at", timezone: "Asia/Colombo" }
+          },
+          actual_door_stable_ms: { $avg: "$door_stable_ms" },
+          sample_count:          { $sum: 1 },
+          latest_captured_at:    { $max: "$captured_at" }
+        }
+      }
+    ]);
+
+    // ── Step 2b: Historical fallback — all-time average per hour ───────────
+    const historicalMatch = { door_stable_ms: { $gt: 0 } };
+    if (roomId) historicalMatch.room_id = roomId;
+
+    const historicalReadings = await SensorReading.aggregate([
+      { $match: historicalMatch },
+      {
+        $group: {
+          _id: {
+            $hour: { date: "$captured_at", timezone: "Asia/Colombo" }
+          },
+          historical_avg_ms: { $avg: "$door_stable_ms" }
+        }
+      }
+    ]);
+
+    // ── Step 2c: Build lookup maps ─────────────────────────────────────────
+    const actualMap = {};
+    actualReadings.forEach((item) => {
+      actualMap[item._id] = item;
+    });
+
+    const historicalMap = {};
+    historicalReadings.forEach((item) => {
+      historicalMap[item._id] = item.historical_avg_ms;
+    });
+
+    // ── Step 3: Pull Prophet forecasts ─────────────────────────────────────
+    const forecastQuery = { model_name: "prophet" };
+    if (roomId) forecastQuery.room_id = roomId;
+
+    const forecasts = await SecurityForecast.find(forecastQuery)
+      .sort({ hour: 1 })
+      .lean();
+
+    // ── Step 4: Get current hour in Colombo timezone ───────────────────────
+    const currentHour = Number(
+      new Intl.DateTimeFormat("en-US", {
+        timeZone: "Asia/Colombo",
+        hour: "numeric",
+        hour12: false
+      }).format(new Date())
+    );
+
+    // ── Step 5: Build hour base — full 24 hours for expected line ──────────
+    const hours = forecasts.length
+      ? forecasts
+      : Array.from({ length: 24 }, (_, i) => ({
+          hour: i,
+          hour_label: `${i}:00`,
+          expected_door_stable_ms:  null,
+          expected_door_stable_min: null,
+          lower_bound_ms: null,
+          upper_bound_ms: null
+        }));
+
+    // ── Step 5: Merge everything into trend array ───────────────────────────
+   const trend = hours.map((forecast) => {
+      const hour   = forecast.hour;
+      const isFutureHour = hour > currentHour;   // ← key check
+
+      const actual = actualMap[hour];
+
+      // Future hours — no actual data regardless of what's in the map
+      const isLiveData = !isFutureHour && !!actual;
+      const actualMs = isFutureHour
+        ? null                                    // ← null for future hours
+        : actual
+        ? Math.round(actual.actual_door_stable_ms)
+        : historicalMap[hour]
+        ? Math.round(historicalMap[hour])
+        : null;
+
+      const expectedMs = forecast.expected_door_stable_ms
+        ? Math.round(forecast.expected_door_stable_ms)
+        : null;
+
+      const deviationMs = actualMs != null && expectedMs != null
+        ? actualMs - expectedMs
+        : null;
+
+      // Trend status — only when both values are present and it's live data
+      let trend_status = "No Data";
+      if (actualMs != null && expectedMs != null) {
+        if (!isLiveData) {
+          trend_status = "Historical Average";
+        } else if (actualMs > forecast.upper_bound_ms) {
+          trend_status = "Above Expected (Anomalous)";
+        } else if (actualMs < forecast.lower_bound_ms) {
+          trend_status = "Below Expected (Anomalous)";
+        } else if (actualMs > expectedMs) {
+          trend_status = "Above Expected (Normal Range)";
+        } else if (actualMs < expectedMs) {
+          trend_status = "Below Expected (Normal Range)";
+        } else {
+          trend_status = "Normal";
+        }
+      }
+
+      return {
+        hour,
+        hour_label:  forecast.hour_label || `${hour}:00`,
+        date:        today,
+
+        // Actual — live today or historical fallback
+        actual_door_stable_ms:  actualMs,
+        actual_door_stable_min: actualMs != null
+          ? Number((actualMs / 60000).toFixed(2))
+          : null,
+        is_live_data:       isLiveData,
+        sample_count:       actual?.sample_count || 0,
+        latest_captured_at: actual?.latest_captured_at || null,
+
+        // Prophet ML values
+        expected_door_stable_ms:  expectedMs,
+        expected_door_stable_min: expectedMs != null
+          ? Number((expectedMs / 60000).toFixed(2))
+          : null,
+        lower_bound_ms: forecast.lower_bound_ms
+          ? Math.round(forecast.lower_bound_ms)
+          : null,
+        upper_bound_ms: forecast.upper_bound_ms
+          ? Math.round(forecast.upper_bound_ms)
+          : null,
+
+        // Deviation
+        deviation_ms:  deviationMs,
+        deviation_min: deviationMs != null
+          ? Number((deviationMs / 60000).toFixed(2))
+          : null,
+
+        trend_status,
+        model_name: "prophet"
+      };
+    });
+
+    res.json({
+      summary: {
+        room_id:       roomId || "ALL",
+        date:          today,
+        hours_covered: trend.length,
+        model_name:    "prophet"
+      },
+      trend
+    });
+
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
+async function getSecurityAnomalies(req, res) {
+  try {
+    const { roomId } = req.query;
+    const limit = Number(req.query.limit || 50);
+
+    // Step 1: Pull Isolation Forest anomalies from ML collection
+    const anomalyQuery = { model_name: "isolation_forest" };
+    if (roomId) anomalyQuery.room_id = roomId;
+
+    const mlAnomalies = await SecurityAnomaly.find(anomalyQuery)
+      .sort({ anomaly_score: 1 })       // most anomalous first (most negative score)
+      .limit(limit)
+      .select("-_id -__v")
+      .lean();
+
+    if (!mlAnomalies.length) {
+      return res.json({ anomalies: [] });
+    }
+
+    // Step 2: Enrich each anomaly with Prophet forecast context
+    // Pull forecasts for reference (expected values + confidence bands)
+    const forecastQuery = { model_name: "prophet" };
+    if (roomId) forecastQuery.room_id = roomId;
+
+    const forecasts = await SecurityForecast.find(forecastQuery).lean();
+
+    // Map forecasts by room_id + hour for fast lookup
+    const forecastMap = {};
+    forecasts.forEach((f) => {
+      forecastMap[`${f.room_id}_${f.hour}`] = f;
+    });
+
+    // Step 3: Build enriched response
+    const anomalies = mlAnomalies.map((anomaly) => {
+      const forecastKey = `${anomaly.room_id}_${anomaly.hour}`;
+      const forecast = forecastMap[forecastKey];
+
+      // Check if actual reading is outside Prophet confidence band
+      const isOutsideBand = forecast
+        ? anomaly.door_stable_ms > forecast.upper_bound_ms ||
+          anomaly.door_stable_ms < forecast.lower_bound_ms
+        : null;
+
+      return {
+        room_id: anomaly.room_id,
+        captured_at: anomaly.captured_at,
+        hour: anomaly.hour,
+
+        // Isolation Forest output
+        status: anomaly.status,
+        reason: anomaly.reason,
+        severity: anomaly.severity,
+        anomaly_score: anomaly.anomaly_score,   // learned score, not hardcoded
+
+        // Sensor readings
+        door_stable_ms: anomaly.door_stable_ms,
+        door_stable_min: anomaly.door_stable_min,
+        motion_count: anomaly.motion_count,
+        is_after_hours: anomaly.is_after_hours,
+        is_empty: anomaly.is_empty,
+
+        // Prophet context (if available)
+        expected_door_stable_ms: forecast?.expected_door_stable_ms ?? null,
+        expected_door_stable_min: forecast?.expected_door_stable_min ?? null,
+        lower_bound_ms: forecast?.lower_bound_ms ?? null,
+        upper_bound_ms: forecast?.upper_bound_ms ?? null,
+        is_outside_prophet_band: isOutsideBand,
+
+        // Makes ML origin explicit for the dashboard
+        model_name: "isolation_forest"
+      };
+    });
+
+    res.json({ anomalies });
+
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -948,6 +1257,8 @@ module.exports = {
   getSecuritySummary,
   getSecuritySuspiciousRooms,
   getSecurityDoorEvents,
+  getSecurityTrend,
+  getSecurityAnomalies,
   getStudentOverview,
   getStudentEnergyHistory,
   getStudentRecentAlerts
