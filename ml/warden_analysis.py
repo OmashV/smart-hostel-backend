@@ -61,8 +61,8 @@ def ensure_columns(frame, defaults):
 
 def load_source_dataframe():
     """Prefer warden_hourly_summary; fallback to raw sensorreadings if summaries are absent."""
-    hourly_docs = list(db.warden_hourly_summary.find({}, {"_id": 0}))
-    if hourly_docs:
+    hourly_docs = []  # FORCE use sensorreadings for all rooms
+if hourly_docs:
         df = pd.DataFrame(hourly_docs)
         df = ensure_columns(
             df,
