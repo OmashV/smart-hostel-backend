@@ -12,6 +12,8 @@ const WardenAnomaly = require("../models/WardenAnomaly");
 const WardenPattern = require("../models/WardenPattern");
 const SecurityForecast = require("../models/SecurityForecast");
 const SecurityAnomaly = require("../models/SecurityAnomaly");
+const DemoSecurityReading = require("../models/DemoSecurityReading");
+const { getSecuritySource, REAL_ROOM } = require("../utils/securityReadingSource");
 
 
 const TIMEZONE = "Asia/Colombo";
@@ -877,35 +879,62 @@ async function getOwnerAnomalies(req, res) {
 
 
 // ================= SECURITY =================
+
+
+// ── Helpers to query both collections ────────────────────────────────────────
+async function aggregateBothSources(pipeline) {
+  const [real, demo] = await Promise.all([
+    SensorReading.aggregate(pipeline),
+    DemoSecurityReading.aggregate(pipeline)
+  ]);
+  return [...real, ...demo];
+}
+
+async function findBothSources(query, options = {}) {
+  const [real, demo] = await Promise.all([
+    SensorReading.find(query)
+      .sort(options.sort || {})
+      .limit(options.limit || 0)
+      .select(options.select || "")
+      .lean(),
+    DemoSecurityReading.find(query)
+      .sort(options.sort || {})
+      .limit(options.limit || 0)
+      .select(options.select || "")
+      .lean()
+  ]);
+  return [...real, ...demo];
+}
+
+function pickSource(roomId) {
+  if (!roomId) return null;                                           // needs merge
+  return roomId === REAL_ROOM ? SensorReading : DemoSecurityReading;
+}
+
+// ── getSecuritySummary ────────────────────────────────────────────────────────
 async function getSecuritySummary(req, res) {
   try {
     const { roomId } = req.query;
 
     const pipeline = [];
-
-    if (roomId) {
-      pipeline.push({ $match: { room_id: roomId } });
-    }
+    if (roomId) pipeline.push({ $match: { room_id: roomId } });
 
     pipeline.push(
       { $sort: { room_id: 1, captured_at: -1 } },
-      {
-        $group: {
-          _id: "$room_id",
-          latest: { $first: "$$ROOT" }
-        }
-      },
+      { $group: { _id: "$room_id", latest: { $first: "$$ROOT" } } },
       { $replaceRoot: { newRoot: "$latest" } }
     );
 
-    const latestPerRoom = await SensorReading.aggregate(pipeline);
+    const latestPerRoom = roomId
+      ? await pickSource(roomId).aggregate(pipeline)
+      : await aggregateBothSources(pipeline);
 
     const summary = {
       active_security_alerts: 0,
-      suspicious_rooms: 0,
-      door_open_rooms: 0,
-      high_risk_rooms: 0,
-      after_hours_events: 0
+      suspicious_rooms:       0,
+      door_open_rooms:        0,
+      high_risk_rooms:        0,
+      after_hours_events:     0
     };
 
     for (const room of latestPerRoom) {
@@ -916,22 +945,18 @@ async function getSecuritySummary(req, res) {
         (room.motion_count > 0 && isAfterHours);
 
       let riskScore = 0;
-
       if (room.door_status === "Open" && room.door_stable_ms > 1800000) riskScore += 3;
       else if (room.door_status === "Open" && room.door_stable_ms > 600000) riskScore += 2;
-
-      if (room.motion_count === 0) riskScore += 1;
-      if (isAfterHours) riskScore += 2;
+      if (room.motion_count === 0)         riskScore += 1;
+      if (isAfterHours)                    riskScore += 2;
       if (room.occupancy_stat === "Empty") riskScore += 2;
 
       if (room.door_status === "Open") summary.door_open_rooms++;
-      if (isAfterHours) summary.after_hours_events++;
-
+      if (isAfterHours)                summary.after_hours_events++;
       if (suspicious) {
         summary.suspicious_rooms++;
         summary.active_security_alerts++;
       }
-
       if (riskScore >= 4) summary.high_risk_rooms++;
     }
 
@@ -941,24 +966,17 @@ async function getSecuritySummary(req, res) {
   }
 }
 
+// ── getSecuritySuspiciousRooms ────────────────────────────────────────────────
 async function getSecuritySuspiciousRooms(req, res) {
   try {
     const { roomId } = req.query;
 
     const pipeline = [];
-
-    if (roomId) {
-      pipeline.push({ $match: { room_id: roomId } });
-    }
+    if (roomId) pipeline.push({ $match: { room_id: roomId } });
 
     pipeline.push(
       { $sort: { room_id: 1, captured_at: -1 } },
-      {
-        $group: {
-          _id: "$room_id",
-          latest: { $first: "$$ROOT" }
-        }
-      },
+      { $group: { _id: "$room_id", latest: { $first: "$$ROOT" } } },
       { $replaceRoot: { newRoot: "$latest" } },
       {
         $addFields: {
@@ -989,17 +1007,19 @@ async function getSecuritySuspiciousRooms(req, res) {
       {
         $project: {
           _id: 0,
-          room_id: 1,
-          door_status: 1,
+          room_id:       1,
+          door_status:   1,
           door_stable_ms: 1,
-          motion_count: 1,
-          hour: 1,
-          captured_at: 1
+          motion_count:  1,
+          hour:          1,
+          captured_at:   1
         }
       }
     );
 
-    const rooms = await SensorReading.aggregate(pipeline);
+    const rooms = roomId
+      ? await pickSource(roomId).aggregate(pipeline)
+      : await aggregateBothSources(pipeline);
 
     res.json({ rooms });
   } catch (error) {
@@ -1007,23 +1027,35 @@ async function getSecuritySuspiciousRooms(req, res) {
   }
 }
 
+// ── getSecurityDoorEvents ─────────────────────────────────────────────────────
 async function getSecurityDoorEvents(req, res) {
   try {
     const { roomId } = req.query;
     const limit = Number(req.query.limit || 50);
 
-    const query = {
-      door_status: "Open"
-    };
+    const query  = { door_status: "Open" };
+    if (roomId) query.room_id = roomId;
 
+    const selectFields = "room_id captured_at door_status door_stable_ms motion_count hour minute second -_id";
+
+    let events;
     if (roomId) {
-      query.room_id = roomId;
+      events = await pickSource(roomId)
+        .find(query)
+        .sort({ captured_at: -1 })
+        .limit(limit)
+        .select(selectFields)
+        .lean();
+    } else {
+      const all = await findBothSources(query, {
+        sort:   { captured_at: -1 },
+        limit,
+        select: selectFields
+      });
+      events = all
+        .sort((a, b) => new Date(b.captured_at) - new Date(a.captured_at))
+        .slice(0, limit);
     }
-
-    const events = await SensorReading.find(query)
-      .sort({ captured_at: -1 })
-      .limit(limit)
-      .select("room_id captured_at door_status door_stable_ms motion_count hour minute second -_id");
 
     res.json({ events });
   } catch (error) {
@@ -1031,6 +1063,7 @@ async function getSecurityDoorEvents(req, res) {
   }
 }
 
+// ── getSecurityTrend ──────────────────────────────────────────────────────────
 async function getSecurityTrend(req, res) {
   try {
     const { roomId } = req.query;
@@ -1050,7 +1083,7 @@ async function getSecurityTrend(req, res) {
     };
     if (roomId) actualMatch.room_id = roomId;
 
-    const actualReadings = await SensorReading.aggregate([
+    const actualGroupPipeline = [
       { $match: actualMatch },
       {
         $group: {
@@ -1062,34 +1095,71 @@ async function getSecurityTrend(req, res) {
           latest_captured_at:    { $max: "$captured_at" }
         }
       }
-    ]);
+    ];
 
-    // ── Step 2b: Historical fallback — all-time average per hour ───────────
+    const actualReadingsRaw = roomId
+      ? await pickSource(roomId).aggregate(actualGroupPipeline)
+      : await aggregateBothSources(actualGroupPipeline);
+
+    // If merged, re-group by hour across both sources
+    const actualByHour = {};
+    for (const item of actualReadingsRaw) {
+      const h = item._id;
+      if (!actualByHour[h]) {
+        actualByHour[h] = { sum: 0, count: 0, latest: null };
+      }
+      actualByHour[h].sum   += (item.actual_door_stable_ms || 0) * (item.sample_count || 1);
+      actualByHour[h].count += item.sample_count || 1;
+      if (!actualByHour[h].latest || item.latest_captured_at > actualByHour[h].latest) {
+        actualByHour[h].latest = item.latest_captured_at;
+      }
+    }
+
+    const actualMap = {};
+    for (const [h, val] of Object.entries(actualByHour)) {
+      actualMap[Number(h)] = {
+        actual_door_stable_ms: val.sum / val.count,
+        sample_count:          val.count,
+        latest_captured_at:    val.latest
+      };
+    }
+
+    // ── Step 2b: Historical fallback ───────────────────────────────────────
     const historicalMatch = { door_stable_ms: { $gt: 0 } };
     if (roomId) historicalMatch.room_id = roomId;
 
-    const historicalReadings = await SensorReading.aggregate([
+    const historicalGroupPipeline = [
       { $match: historicalMatch },
       {
         $group: {
           _id: {
             $hour: { date: "$captured_at", timezone: "Asia/Colombo" }
           },
-          historical_avg_ms: { $avg: "$door_stable_ms" }
+          historical_avg_ms: { $avg: "$door_stable_ms" },
+          count:             { $sum: 1 }
         }
       }
-    ]);
+    ];
 
-    // ── Step 2c: Build lookup maps ─────────────────────────────────────────
-    const actualMap = {};
-    actualReadings.forEach((item) => {
-      actualMap[item._id] = item;
-    });
+    const historicalReadingsRaw = roomId
+      ? await pickSource(roomId).aggregate(historicalGroupPipeline)
+      : await aggregateBothSources(historicalGroupPipeline);
+
+    // Re-group historical across both sources
+    const historicalByHour = {};
+    for (const item of historicalReadingsRaw) {
+      const h = item._id;
+      if (!historicalByHour[h]) {
+        historicalByHour[h] = { sum: 0, count: 0 };
+      }
+      historicalByHour[h].sum   += (item.historical_avg_ms || 0) * (item.count || 1);
+      historicalByHour[h].count += item.count || 1;
+    }
 
     const historicalMap = {};
-    historicalReadings.forEach((item) => {
-      historicalMap[item._id] = item.historical_avg_ms;
-    });
+    for (const [h, val] of Object.entries(historicalByHour)) {
+      historicalMap[Number(h)] = val.sum / val.count;
+    }
 
     // ── Step 3: Pull Prophet forecasts ─────────────────────────────────────
     const forecastQuery = { model_name: "prophet" };
@@ -1099,12 +1169,12 @@ async function getSecurityTrend(req, res) {
       .sort({ hour: 1 })
       .lean();
 
-    // ── Step 4: Get current hour in Colombo timezone ───────────────────────
+    // ── Step 4: Current hour in Colombo ────────────────────────────────────
     const currentHour = Number(
       new Intl.DateTimeFormat("en-US", {
         timeZone: "Asia/Colombo",
-        hour: "numeric",
-        hour12: false
+        hour:     "numeric",
+        hour12:   false
       }).format(new Date())
     );
 
@@ -1112,32 +1182,30 @@ async function getSecurityTrend(req, res) {
     const hours = forecasts.length
       ? forecasts
       : Array.from({ length: 24 }, (_, i) => ({
-          hour: i,
-          hour_label: `${i}:00`,
+          hour:                     i,
+          hour_label:               `${i}:00`,
           expected_door_stable_ms:  null,
           expected_door_stable_min: null,
-          lower_bound_ms: null,
-          upper_bound_ms: null
+          lower_bound_ms:           null,
+          upper_bound_ms:           null
         }));
 
-    // ── Step 5: Merge everything into trend array ───────────────────────────
-   const trend = hours.map((forecast) => {
-      const hour   = forecast.hour;
-      const isFutureHour = hour > currentHour;   // ← key check
+    // ── Step 6: Merge into trend array ─────────────────────────────────────
+    const trend = hours.map((forecast) => {
+      const hour         = forecast.hour;
+      const isFutureHour = hour > currentHour;
+      const actual       = actualMap[hour];
 
-      const actual = actualMap[hour];
-
-      // Future hours — no actual data regardless of what's in the map
       const isLiveData = !isFutureHour && !!actual;
-      const actualMs = isFutureHour
-        ? null                                    // ← null for future hours
+      const actualMs   = isFutureHour
+        ? null
         : actual
         ? Math.round(actual.actual_door_stable_ms)
-        : historicalMap[hour]
+        : historicalMap[hour] != null
         ? Math.round(historicalMap[hour])
         : null;
 
-      const expectedMs = forecast.expected_door_stable_ms
+      const expectedMs  = forecast.expected_door_stable_ms
         ? Math.round(forecast.expected_door_stable_ms)
         : null;
 
@@ -1145,7 +1213,6 @@ async function getSecurityTrend(req, res) {
         ? actualMs - expectedMs
         : null;
 
-      // Trend status — only when both values are present and it's live data
       let trend_status = "No Data";
       if (actualMs != null && expectedMs != null) {
         if (!isLiveData) {
@@ -1168,7 +1235,6 @@ async function getSecurityTrend(req, res) {
         hour_label:  forecast.hour_label || `${hour}:00`,
         date:        today,
 
-        // Actual — live today or historical fallback
         actual_door_stable_ms:  actualMs,
         actual_door_stable_min: actualMs != null
           ? Number((actualMs / 60000).toFixed(2))
@@ -1177,7 +1243,6 @@ async function getSecurityTrend(req, res) {
         sample_count:       actual?.sample_count || 0,
         latest_captured_at: actual?.latest_captured_at || null,
 
-        // Prophet ML values
         expected_door_stable_ms:  expectedMs,
         expected_door_stable_min: expectedMs != null
           ? Number((expectedMs / 60000).toFixed(2))
@@ -1189,7 +1254,6 @@ async function getSecurityTrend(req, res) {
           ? Math.round(forecast.upper_bound_ms)
           : null,
 
-        // Deviation
         deviation_ms:  deviationMs,
         deviation_min: deviationMs != null
           ? Number((deviationMs / 60000).toFixed(2))
@@ -1215,17 +1279,17 @@ async function getSecurityTrend(req, res) {
   }
 }
 
+// ── getSecurityAnomalies ──────────────────────────────────────────────────────
 async function getSecurityAnomalies(req, res) {
   try {
     const { roomId } = req.query;
     const limit = Number(req.query.limit || 50);
 
-    // Step 1: Pull Isolation Forest anomalies from ML collection
     const anomalyQuery = { model_name: "isolation_forest" };
     if (roomId) anomalyQuery.room_id = roomId;
 
     const mlAnomalies = await SecurityAnomaly.find(anomalyQuery)
-      .sort({ anomaly_score: 1 })       // most anomalous first (most negative score)
+      .sort({ anomaly_score: 1 })
       .limit(limit)
       .select("-_id -__v")
       .lean();
@@ -1234,62 +1298,50 @@ async function getSecurityAnomalies(req, res) {
       return res.json({ anomalies: [] });
     }
 
-    // Step 2: Enrich each anomaly with Prophet forecast context
-    // Pull forecasts for reference (expected values + confidence bands)
     const forecastQuery = { model_name: "prophet" };
     if (roomId) forecastQuery.room_id = roomId;
 
     const forecasts = await SecurityForecast.find(forecastQuery).lean();
 
-    // Map forecasts by room_id + hour for fast lookup
     const forecastMap = {};
     forecasts.forEach((f) => {
       forecastMap[`${f.room_id}_${f.hour}`] = f;
     });
 
-    // Step 3: Build enriched response
     const anomalies = mlAnomalies.map((anomaly) => {
-      const forecastKey = `${anomaly.room_id}_${anomaly.hour}`;
-      const forecast = forecastMap[forecastKey];
-
-      // Check if actual reading is outside Prophet confidence band
+      const forecast      = forecastMap[`${anomaly.room_id}_${anomaly.hour}`];
       const isOutsideBand = forecast
         ? anomaly.door_stable_ms > forecast.upper_bound_ms ||
           anomaly.door_stable_ms < forecast.lower_bound_ms
         : null;
 
       return {
-        room_id: anomaly.room_id,
-        captured_at: anomaly.captured_at,
-        hour: anomaly.hour,
+        room_id:      anomaly.room_id,
+        captured_at:  anomaly.captured_at,
+        hour:         anomaly.hour,
 
-        // Isolation Forest output
-        status: anomaly.status,
-        reason: anomaly.reason,
-        severity: anomaly.severity,
-        anomaly_score: anomaly.anomaly_score,   // learned score, not hardcoded
+        status:        anomaly.status,
+        reason:        anomaly.reason,
+        severity:      anomaly.severity,
+        anomaly_score: anomaly.anomaly_score,
 
-        // Sensor readings
-        door_stable_ms: anomaly.door_stable_ms,
+        door_stable_ms:  anomaly.door_stable_ms,
         door_stable_min: anomaly.door_stable_min,
-        motion_count: anomaly.motion_count,
-        is_after_hours: anomaly.is_after_hours,
-        is_empty: anomaly.is_empty,
+        motion_count:    anomaly.motion_count,
+        is_after_hours:  anomaly.is_after_hours,
+        is_empty:        anomaly.is_empty,
 
-        // Prophet context (if available)
-        expected_door_stable_ms: forecast?.expected_door_stable_ms ?? null,
+        expected_door_stable_ms:  forecast?.expected_door_stable_ms  ?? null,
         expected_door_stable_min: forecast?.expected_door_stable_min ?? null,
-        lower_bound_ms: forecast?.lower_bound_ms ?? null,
-        upper_bound_ms: forecast?.upper_bound_ms ?? null,
-        is_outside_prophet_band: isOutsideBand,
+        lower_bound_ms:           forecast?.lower_bound_ms           ?? null,
+        upper_bound_ms:           forecast?.upper_bound_ms           ?? null,
+        is_outside_prophet_band:  isOutsideBand,
 
-        // Makes ML origin explicit for the dashboard
         model_name: "isolation_forest"
       };
     });
 
     res.json({ anomalies });
-
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
