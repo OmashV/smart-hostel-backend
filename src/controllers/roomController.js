@@ -639,7 +639,15 @@ async function getOwnerForecasts(req, res) {
 
 async function getWardenSummary(req, res) {
   try {
-    const latestPerRoom = await SensorReading.aggregate([
+    const { roomId = "All" } = req.query;
+
+    const matchStage =
+      roomId && roomId !== "All"
+        ? { $match: { room_id: roomId } }
+        : null;
+
+    const pipeline = [
+      ...(matchStage ? [matchStage] : []),
       { $sort: { room_id: 1, captured_at: -1 } },
       {
         $group: {
@@ -648,9 +656,12 @@ async function getWardenSummary(req, res) {
         }
       },
       { $replaceRoot: { newRoot: "$latest" } }
-    ]);
+    ];
+
+    const latestPerRoom = await SensorReading.aggregate(pipeline);
 
     const summary = {
+      room_id: roomId,
       occupied_rooms: 0,
       empty_rooms: 0,
       sleeping_rooms: 0,
@@ -686,7 +697,15 @@ async function getWardenSummary(req, res) {
 
 async function getWardenRoomsStatus(req, res) {
   try {
-    const latestPerRoom = await SensorReading.aggregate([
+    const { roomId = "All" } = req.query;
+
+    const matchStage =
+      roomId && roomId !== "All"
+        ? { $match: { room_id: roomId } }
+        : null;
+
+    const pipeline = [
+      ...(matchStage ? [matchStage] : []),
       { $sort: { room_id: 1, captured_at: -1 } },
       {
         $group: {
@@ -696,10 +715,15 @@ async function getWardenRoomsStatus(req, res) {
       },
       { $replaceRoot: { newRoot: "$latest" } },
       { $sort: { room_id: 1 } }
-    ]);
+    ];
 
+    const latestPerRoom = await SensorReading.aggregate(pipeline);
     const rooms = latestPerRoom.map(normalizeWardenRoom);
-    res.json({ rooms });
+
+    res.json({
+      room_id: roomId,
+      rooms
+    });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -755,6 +779,47 @@ async function getWardenAnomalies(req, res) {
     const query = roomId && roomId !== "All" ? { room_id: roomId } : {};
     const items = await WardenAnomaly.find(query).sort({ date: -1 }).lean();
     res.json({ items });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
+
+async function getWardenDataRange(req, res) {
+  try {
+    const { roomId = "All" } = req.query;
+    const query = roomId && roomId !== "All" ? { room_id: roomId } : {};
+
+    const totalRecords = await SensorReading.countDocuments(query);
+    const first = await SensorReading.findOne(query).sort({ captured_at: 1 }).lean();
+    const last = await SensorReading.findOne(query).sort({ captured_at: -1 }).lean();
+
+    if (!first || !last) {
+      return res.json({
+        room_id: roomId,
+        total_records: 0,
+        first_timestamp: null,
+        last_timestamp: null,
+        total_days_covered: 0,
+        is_valid_5_to_7_days_or_more: false
+      });
+    }
+
+    const firstDate = new Date(first.captured_at);
+    const lastDate = new Date(last.captured_at);
+    const totalDaysCovered = Math.max(
+      0,
+      (lastDate - firstDate) / (1000 * 60 * 60 * 24)
+    );
+
+    return res.json({
+      room_id: roomId,
+      total_records: totalRecords,
+      first_timestamp: first.captured_at,
+      last_timestamp: last.captured_at,
+      total_days_covered: Number(totalDaysCovered.toFixed(2)),
+      is_valid_5_to_7_days_or_more: totalDaysCovered >= 5
+    });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -1598,6 +1663,7 @@ module.exports = {
   getWardenPatterns,
   getWardenForecasts,
   getWardenMlAlerts,
+  getWardenDataRange,
   getSecuritySummary,
   getSecuritySuspiciousRooms,
   getSecurityDoorEvents,

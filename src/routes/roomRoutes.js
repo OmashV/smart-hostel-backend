@@ -26,6 +26,7 @@ const {
   getWardenForecasts,
   getWardenHistory,
   getWardenMlAlerts,
+  getWardenDataRange,
   getSecuritySummary,
   getSecuritySuspiciousRooms,
   getSecurityDoorEvents,
@@ -69,6 +70,7 @@ router.get("/warden/patterns", getWardenPatterns);
 router.get("/warden/forecasts", getWardenForecasts);
 router.get("/warden/history", getWardenHistory);
 router.get("/warden/ml-alerts", getWardenMlAlerts);
+router.get("/warden/data-range", getWardenDataRange);
 
 // security
 router.get("/security/summary", getSecuritySummary);

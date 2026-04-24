@@ -1,13 +1,14 @@
 """
-Warden ML pipeline for Smart Hostel Assignment 02.
+Final Warden ML pipeline for Smart Hostel Assignment 02.
 
-Reads MongoDB room/sensor summaries, trains ML/statistical models, and writes
-Warden dashboard outputs to MongoDB collections:
-- warden_forecasts      : 7-day temporal forecasting per room
-- warden_anomalies      : IsolationForest anomaly/outlier detections
-- warden_patterns       : KMeans Monday-Sunday usage/behavior patterns
-- warden_ml_alerts      : ML-generated alerts, no frontend rules
-- warden_feature_importance : RandomForest feature importances for explanation
+Reads real MongoDB sensor/warden summary data, trains ML/statistical models, and writes
+Warden dashboard outputs back to MongoDB collections:
+
+- warden_forecasts       : 7-day temporal forecasting per room
+- warden_anomalies       : IsolationForest anomaly/outlier detections
+- warden_ml_alerts       : ML-generated alerts using IsolationForest anomaly scores only
+- warden_patterns        : KMeans Monday-Sunday usage/behavior patterns
+- warden_feature_importance : RandomForest feature importance for explanation
 
 Run from backend root:
   python ml/warden_analysis.py
@@ -19,9 +20,9 @@ from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
-from pymongo import MongoClient, UpdateOne
+from pymongo import MongoClient
 from sklearn.cluster import KMeans
-from sklearn.ensemble import IsolationForest, RandomForestClassifier, RandomForestRegressor
+from sklearn.ensemble import IsolationForest, RandomForestRegressor
 from sklearn.preprocessing import StandardScaler
 
 try:
@@ -35,7 +36,7 @@ load_dotenv()
 
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/smart_hostel")
 DB_NAME = os.getenv("MONGO_DB", os.getenv("DB_NAME", "smart_hostel"))
-TIMEZONE = "Asia/Colombo"
+
 ORDERED_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
 client = MongoClient(MONGO_URI)
@@ -59,7 +60,7 @@ def ensure_columns(frame, defaults):
 
 
 def load_source_dataframe():
-    """Prefer WardenHourlySummary; fallback to SensorReading if summaries are absent."""
+    """Prefer warden_hourly_summary; fallback to raw sensorreadings if summaries are absent."""
     hourly_docs = list(db.warden_hourly_summary.find({}, {"_id": 0}))
     if hourly_docs:
         df = pd.DataFrame(hourly_docs)
@@ -115,6 +116,8 @@ def load_source_dataframe():
     raw = raw.dropna(subset=["captured_at"])
     raw["date"] = raw["captured_at"].dt.floor("D")
     raw["hour"] = raw["captured_at"].dt.hour
+
+    # These are observed states from stored data; they are used only to aggregate historical summaries.
     raw["occupied_flag"] = raw["occupancy_stat"].astype(str).str.lower().str.contains("occupied|sleeping").astype(int)
     raw["empty_flag"] = raw["occupancy_stat"].astype(str).str.lower().str.contains("empty").astype(int)
     raw["sleeping_flag"] = raw["occupancy_stat"].astype(str).str.lower().str.contains("sleeping").astype(int)
@@ -154,7 +157,7 @@ def add_time_features(df):
 
 
 def train_forecasts(df):
-    """7-day daily forecast per room using Prophet when available, otherwise RF regressor."""
+    """7-day daily forecast per room using Prophet when available; RF regressor fallback."""
     db.warden_forecasts.delete_many({})
     docs = []
 
@@ -176,7 +179,7 @@ def train_forecasts(df):
 
     for room_id, room_daily in daily.groupby("room_id"):
         room_daily = room_daily.sort_values("date_only")
-        if len(room_daily) < 5:
+        if len(room_daily) < 3:
             continue
 
         last_date = room_daily["date_only"].max()
@@ -193,8 +196,7 @@ def train_forecasts(df):
                 train = room_daily[["date_only", target]].rename(columns={"date_only": "ds", target: "y"})
                 model = Prophet(daily_seasonality=False, weekly_seasonality=True, yearly_seasonality=False)
                 model.fit(train)
-                future = pd.DataFrame({"ds": future_dates})
-                forecast = model.predict(future)[["ds", "yhat"]]
+                forecast = model.predict(pd.DataFrame({"ds": future_dates}))[["ds", "yhat"]]
                 predictions[output_name] = forecast["yhat"].clip(lower=0).tolist()
         else:
             model_name = "RandomForestRegressor"
@@ -218,7 +220,7 @@ def train_forecasts(df):
                 predictions[output_name] = np.clip(model.predict(future_frame[feature_cols].fillna(0)), 0, None).tolist()
 
         for idx, forecast_date in enumerate(future_dates):
-            doc = {
+            docs.append({
                 "room_id": str(room_id),
                 "date": forecast_date.strftime("%Y-%m-%d"),
                 "predicted_occupied_count": round(float(predictions["predicted_occupied_count"][idx]), 4),
@@ -226,8 +228,7 @@ def train_forecasts(df):
                 "predicted_violation_count": round(float(predictions["predicted_violation_count"][idx]), 4),
                 "model_name": model_name,
                 "generated_at": datetime.utcnow(),
-            }
-            docs.append(doc)
+            })
 
     if docs:
         db.warden_forecasts.insert_many(docs)
@@ -235,6 +236,11 @@ def train_forecasts(df):
 
 
 def train_anomalies_and_alerts(df):
+    """
+    IsolationForest is used for both anomaly detection and ML alerts.
+    No fixed sensor threshold such as sound_peak > X is used to create alerts.
+    Alert severity is based on learned anomaly-score quantiles from the model output.
+    """
     db.warden_anomalies.delete_many({})
     db.warden_ml_alerts.delete_many({})
     db.warden_feature_importance.delete_many({})
@@ -262,74 +268,72 @@ def train_anomalies_and_alerts(df):
     scaler = StandardScaler()
     scaled = scaler.fit_transform(data)
 
-    iso = IsolationForest(contamination=min(0.2, max(0.05, 8 / len(data))), random_state=42)
-    df["anomaly_flag"] = iso.fit_predict(scaled)
+    iso = IsolationForest(contamination="auto", random_state=42)
+    anomaly_flags = iso.fit_predict(scaled)
     raw_scores = -iso.decision_function(scaled)
     score_min, score_max = float(np.min(raw_scores)), float(np.max(raw_scores))
-    df["anomaly_score"] = (raw_scores - score_min) / (score_max - score_min + 1e-9)
+    normalized_scores = (raw_scores - score_min) / (score_max - score_min + 1e-9)
 
-    # Supervised ML alert model learns from historic incident labels in the stored data.
-    # The frontend never creates alerts with if/else; it only displays this model output.
-    df["historic_alert_label"] = (
-        (df["warning_count"].fillna(0) > 0)
-        | (df["violation_count"].fillna(0) > 0)
-        | (df["complaint_count"].fillna(0) > 0)
-        | (df["inspection_count"].fillna(0) > 0)
-    ).astype(int)
+    df["anomaly_flag"] = anomaly_flags
+    df["anomaly_score"] = normalized_scores
 
-    alert_model = RandomForestClassifier(n_estimators=250, random_state=42, class_weight="balanced")
-    alert_model.fit(data, df["historic_alert_label"])
-    alert_prob = alert_model.predict_proba(data)[:, 1]
-    alert_pred = alert_model.predict(data)
-    df["alert_probability"] = alert_prob
-    df["alert_pred"] = alert_pred
+    anomaly_rows = df[df["anomaly_flag"] == -1].copy()
+    if not anomaly_rows.empty:
+        critical_cutoff = float(anomaly_rows["anomaly_score"].quantile(0.75))
+    else:
+        critical_cutoff = 1.0
 
-    feature_docs = [
-        {"feature": feature, "importance": round(float(importance), 6), "model_name": "RandomForestClassifier"}
-        for feature, importance in zip(feature_cols, alert_model.feature_importances_)
-    ]
-    if feature_docs:
-        db.warden_feature_importance.insert_many(feature_docs)
+    # Extra model for explanation only: feature importances are not used to generate alerts.
+    try:
+        explanation_target = (df["anomaly_flag"] == -1).astype(int)
+        if explanation_target.nunique() > 1:
+            rf = RandomForestRegressor(n_estimators=200, random_state=42)
+            rf.fit(data, explanation_target)
+            feature_docs = [
+                {"feature": feature, "importance": round(float(importance), 6), "model_name": "RandomForestRegressor"}
+                for feature, importance in zip(feature_cols, rf.feature_importances_)
+            ]
+            if feature_docs:
+                db.warden_feature_importance.insert_many(feature_docs)
+    except Exception as error:
+        print("Feature importance skipped:", error)
 
     anomaly_docs = []
     alert_docs = []
+
     for _, row in df.iterrows():
         captured = pd.to_datetime(row["datetime"]).strftime("%Y-%m-%d %H:%M:%S")
-        if int(row["anomaly_flag"]) == -1:
-            anomaly_docs.append({
-                "room_id": str(row["room_id"]),
-                "date": captured,
-                "status": "Abnormal",
-                "reason": "IsolationForest detected behavior outside the learned normal room profile",
-                "avg_sound_peak": round(safe_number(row["avg_sound_peak"]), 2),
-                "avg_current": round(safe_number(row["avg_current"]), 4),
-                "violation_count": int(safe_number(row["violation_count"])),
-                "anomaly_score": round(safe_number(row["anomaly_score"]), 4),
-                "model_name": "IsolationForest",
-            })
+        if int(row["anomaly_flag"]) != -1:
+            continue
 
-        # Model-based alert: positive classifier OR strong unsupervised anomaly confidence.
-        if int(row["alert_pred"]) == 1 or safe_number(row["anomaly_score"]) >= 0.75:
-            confidence = max(safe_number(row["alert_probability"]), safe_number(row["anomaly_score"]))
-            if safe_number(row["violation_count"]) > 0:
-                alert_type = "Critical Noise Pattern"
-            elif safe_number(row["inspection_count"]) > 0:
-                alert_type = "Inspection Risk Pattern"
-            elif safe_number(row["complaint_count"]) > 0 or safe_number(row["warning_count"]) > 0:
-                alert_type = "Noise Warning Pattern"
-            else:
-                alert_type = "Abnormal Room Pattern"
-            alert_docs.append({
-                "room_id": str(row["room_id"]),
-                "captured_at": captured,
-                "alert_type": alert_type,
-                "severity": "Critical" if confidence >= 0.75 else "Warning",
-                "confidence": round(float(confidence), 4),
-                "model_name": "RandomForestClassifier + IsolationForest",
-                "reason": "Alert generated from learned incident probability and anomaly score, not a frontend threshold",
-                "source_anomaly_score": round(safe_number(row["anomaly_score"]), 4),
-                "source_alert_probability": round(safe_number(row["alert_probability"]), 4),
-            })
+        score = safe_number(row["anomaly_score"])
+        severity = "Critical" if score >= critical_cutoff else "Warning"
+        alert_type = "ML Anomaly Alert"
+
+        anomaly_doc = {
+            "room_id": str(row["room_id"]),
+            "date": captured,
+            "status": "Abnormal",
+            "reason": "IsolationForest detected behavior outside the learned normal room profile",
+            "avg_sound_peak": round(safe_number(row["avg_sound_peak"]), 2),
+            "avg_current": round(safe_number(row["avg_current"]), 4),
+            "violation_count": int(safe_number(row["violation_count"])),
+            "anomaly_score": round(score, 4),
+            "model_name": "IsolationForest",
+        }
+        anomaly_docs.append(anomaly_doc)
+
+        alert_docs.append({
+            "room_id": str(row["room_id"]),
+            "captured_at": captured,
+            "alert_type": alert_type,
+            "severity": severity,
+            "confidence": round(score, 4),
+            "model_name": "IsolationForest",
+            "reason": "ML alert generated from IsolationForest anomaly score learned from multi-sensor room behavior",
+            "source_anomaly_score": round(score, 4),
+            "source_alert_probability": round(score, 4),
+        })
 
     if anomaly_docs:
         db.warden_anomalies.insert_many(anomaly_docs)
@@ -338,7 +342,6 @@ def train_anomalies_and_alerts(df):
 
     print("warden_anomalies:", len(anomaly_docs))
     print("warden_ml_alerts:", len(alert_docs))
-    print("warden_feature_importance:", len(feature_docs))
 
 
 def train_weekly_patterns(df):
@@ -379,48 +382,12 @@ def train_weekly_patterns(df):
         cluster_to_pattern[int(cluster_id)] = labels[min(idx, len(labels) - 1)]
 
     docs = []
-    for room_id in sorted(df["room_id"].astype(str).unique()):
-        room_df = df[df["room_id"].astype(str) == room_id]
-        for day in ORDERED_DAYS:
-            day_df = room_df[room_df["day_name"] == day]
-            if day_df.empty:
-                doc = {
-                    "room_id": room_id,
-                    "day": day,
-                    "day_type": "Weekend" if day in ["Saturday", "Sunday"] else "Weekday",
-                    "cluster_id": -1,
-                    "usual_pattern": "No Data",
-                    "avg_occupancy": 0,
-                    "avg_noise_level": 0,
-                    "avg_warnings": 0,
-                    "avg_critical_ratio": 0,
-                    "record_count": 0,
-                    "model_name": "KMeans",
-                }
-            else:
-                cluster_id = int(day_df["cluster_id"].mode().iloc[0])
-                critical_ratio = float((day_df["violation_count"].fillna(0) > 0).mean() * 100)
-                doc = {
-                    "room_id": room_id,
-                    "day": day,
-                    "day_type": "Weekend" if day in ["Saturday", "Sunday"] else "Weekday",
-                    "cluster_id": cluster_id,
-                    "usual_pattern": cluster_to_pattern.get(cluster_id, "Pattern Detected"),
-                    "avg_occupancy": round(float(day_df["occupied_count"].mean()), 2),
-                    "avg_noise_level": round(float(day_df["avg_sound_peak"].mean()), 2),
-                    "avg_warnings": round(float(day_df["warning_count"].mean()), 2),
-                    "avg_critical_ratio": round(critical_ratio, 2),
-                    "record_count": int(len(day_df)),
-                    "model_name": "KMeans",
-                }
-            docs.append(doc)
+    all_room_ids = sorted(df["room_id"].astype(str).unique())
 
-    # Aggregate All Rooms profile for All filter / chatbot.
-    for day in ORDERED_DAYS:
-        day_df = df[df["day_name"] == day]
+    def build_day_doc(room_id, day, day_df):
         if day_df.empty:
-            doc = {
-                "room_id": "All",
+            return {
+                "room_id": room_id,
                 "day": day,
                 "day_type": "Weekend" if day in ["Saturday", "Sunday"] else "Weekday",
                 "cluster_id": -1,
@@ -432,22 +399,31 @@ def train_weekly_patterns(df):
                 "record_count": 0,
                 "model_name": "KMeans",
             }
-        else:
-            cluster_id = int(day_df["cluster_id"].mode().iloc[0])
-            doc = {
-                "room_id": "All",
-                "day": day,
-                "day_type": "Weekend" if day in ["Saturday", "Sunday"] else "Weekday",
-                "cluster_id": cluster_id,
-                "usual_pattern": cluster_to_pattern.get(cluster_id, "Pattern Detected"),
-                "avg_occupancy": round(float(day_df["occupied_count"].mean()), 2),
-                "avg_noise_level": round(float(day_df["avg_sound_peak"].mean()), 2),
-                "avg_warnings": round(float(day_df["warning_count"].mean()), 2),
-                "avg_critical_ratio": round(float((day_df["violation_count"].fillna(0) > 0).mean() * 100), 2),
-                "record_count": int(len(day_df)),
-                "model_name": "KMeans",
-            }
-        docs.append(doc)
+
+        cluster_id = int(day_df["cluster_id"].mode().iloc[0])
+        critical_ratio = float((day_df["violation_count"].fillna(0) > 0).mean() * 100)
+
+        return {
+            "room_id": room_id,
+            "day": day,
+            "day_type": "Weekend" if day in ["Saturday", "Sunday"] else "Weekday",
+            "cluster_id": cluster_id,
+            "usual_pattern": cluster_to_pattern.get(cluster_id, "Pattern Detected"),
+            "avg_occupancy": round(float(day_df["occupied_count"].mean()), 2),
+            "avg_noise_level": round(float(day_df["avg_sound_peak"].mean()), 2),
+            "avg_warnings": round(float(day_df["warning_count"].mean()), 2),
+            "avg_critical_ratio": round(critical_ratio, 2),
+            "record_count": int(len(day_df)),
+            "model_name": "KMeans",
+        }
+
+    for room_id in all_room_ids:
+        room_df = df[df["room_id"].astype(str) == room_id]
+        for day in ORDERED_DAYS:
+            docs.append(build_day_doc(room_id, day, room_df[room_df["day_name"] == day]))
+
+    for day in ORDERED_DAYS:
+        docs.append(build_day_doc("All", day, df[df["day_name"] == day]))
 
     if docs:
         db.warden_patterns.insert_many(docs)
@@ -459,8 +435,10 @@ def main():
     if df.empty:
         print("No warden_hourly_summary or sensorreadings data found. Run data collection/backfill first.")
         return
+
     df = add_time_features(df)
     df = df.sort_values(["room_id", "datetime"])
+
     numeric_cols = [
         "occupied_count", "empty_count", "sleeping_count", "avg_sound_peak", "avg_current",
         "door_open_count", "complaint_count", "warning_count", "violation_count", "inspection_count"
@@ -472,6 +450,7 @@ def main():
     train_forecasts(df)
     train_anomalies_and_alerts(df)
     train_weekly_patterns(df)
+
     print("Final collection counts:")
     for name in ["sensorreadings", "warden_forecasts", "warden_anomalies", "warden_patterns", "warden_ml_alerts"]:
         print(name + ":", db[name].count_documents({}))

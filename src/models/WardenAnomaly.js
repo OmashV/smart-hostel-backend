@@ -9,7 +9,8 @@ const WardenAnomalySchema = new mongoose.Schema(
     avg_sound_peak: { type: Number, default: 0 },
     avg_current: { type: Number, default: 0 },
     violation_count: { type: Number, default: 0 },
-    anomaly_score: { type: Number, default: 0 }
+    anomaly_score: { type: Number, default: 0 },
+    model_name: { type: String, default: "IsolationForest" }
   },
   { timestamps: true }
 );
