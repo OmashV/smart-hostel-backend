@@ -6,7 +6,10 @@ const {
   getHighestWastedRoom,
   getRoomDetail,
   getWastePatternByWeekday,
-  getActiveAlerts
+  getActiveAlerts,
+  getOverviewSnapshot,
+  getPrioritySummary,
+  getVisualExplanationContext
 } = require("./ownerChatTools");
 
 const TOOL_IMPL = {
@@ -16,7 +19,10 @@ const TOOL_IMPL = {
   get_highest_wasted_room: getHighestWastedRoom,
   get_room_detail: getRoomDetail,
   get_waste_pattern_by_weekday: getWastePatternByWeekday,
-  get_active_alerts: getActiveAlerts
+  get_active_alerts: getActiveAlerts,
+  get_overview_snapshot: getOverviewSnapshot,
+  get_priority_summary: getPrioritySummary,
+  get_visual_explanation_context: getVisualExplanationContext
 };
 
 const TOOLS = [
@@ -25,13 +31,13 @@ const TOOLS = [
     function: {
       name: "get_floor_overview",
       description:
-        "Get latest floor-wise energy and waste comparison for the owner dashboard.",
+        "Get the latest floor-wise energy and waste comparison for the owner dashboard.",
       parameters: {
         type: "object",
         properties: {
           date: {
             type: "string",
-            description: "Optional summary date in YYYY-MM-DD format"
+            description: "Optional date in YYYY-MM-DD format"
           }
         }
       }
@@ -42,7 +48,7 @@ const TOOLS = [
     function: {
       name: "get_rooms_overview",
       description:
-        "Get latest room-wise overview for all rooms or for a selected floor.",
+        "Get the latest room-wise energy overview for all rooms or for one selected floor.",
       parameters: {
         type: "object",
         properties: {
@@ -52,7 +58,7 @@ const TOOLS = [
           },
           date: {
             type: "string",
-            description: "Optional summary date in YYYY-MM-DD format"
+            description: "Optional date in YYYY-MM-DD format"
           }
         }
       }
@@ -63,7 +69,7 @@ const TOOLS = [
     function: {
       name: "get_top_waste_rooms_today",
       description:
-        "Find the highest wasted-energy rooms for the latest summary date, optionally filtered by floor.",
+        "Get the top highest wasted-energy rooms for the latest available summary date, optionally filtered by floor.",
       parameters: {
         type: "object",
         properties: {
@@ -73,11 +79,11 @@ const TOOLS = [
           },
           limit: {
             type: "number",
-            description: "Number of rooms to return"
+            description: "How many rooms to return"
           },
           date: {
             type: "string",
-            description: "Optional summary date in YYYY-MM-DD format"
+            description: "Optional date in YYYY-MM-DD format"
           }
         }
       }
@@ -88,7 +94,7 @@ const TOOLS = [
     function: {
       name: "get_highest_wasted_room",
       description:
-        "Get the single room with the highest wasted energy for the latest summary date, optionally within a selected floor.",
+        "Get the single room with the highest wasted energy for the selected floor or all floors, using the latest available date for that scope.",
       parameters: {
         type: "object",
         properties: {
@@ -98,7 +104,7 @@ const TOOLS = [
           },
           date: {
             type: "string",
-            description: "Optional summary date in YYYY-MM-DD format"
+            description: "Optional date in YYYY-MM-DD format"
           }
         }
       }
@@ -109,7 +115,7 @@ const TOOLS = [
     function: {
       name: "get_room_detail",
       description:
-        "Get detailed history, alerts, anomalies, and forecast for one room.",
+        "Get detailed information for a room, including latest summary, recent alerts, anomalies, and forecast.",
       parameters: {
         type: "object",
         properties: {
@@ -127,7 +133,7 @@ const TOOLS = [
     function: {
       name: "get_waste_pattern_by_weekday",
       description:
-        "Get weekday-based waste pattern discovery for a specific room, including which weekdays usually have high waste, moderate waste, or efficient usage.",
+        "Get weekday-based waste pattern analysis for a specific room, including which weekdays tend to be high waste, moderate waste, or efficient.",
       parameters: {
         type: "object",
         properties: {
@@ -145,7 +151,7 @@ const TOOLS = [
     function: {
       name: "get_active_alerts",
       description:
-        "Get active owner alerts, optionally filtered by floor or room, for dashboard monitoring and drill-down.",
+        "Get active alerts for all rooms, a selected floor, or one selected room.",
       parameters: {
         type: "object",
         properties: {
@@ -164,41 +170,127 @@ const TOOLS = [
         }
       }
     }
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_overview_snapshot",
+      description:
+        "Get the latest overview snapshot for all rooms or one selected floor, used for chart explanation and overview questions.",
+      parameters: {
+        type: "object",
+        properties: {
+          floorId: {
+            type: "string",
+            description: 'Floor id like "A-Floor-1" or "all"'
+          }
+        }
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_priority_summary",
+      description:
+        "Get backend-calculated room priorities for decision-oriented questions, such as what the owner should focus on first.",
+      parameters: {
+        type: "object",
+        properties: {
+          floorId: {
+            type: "string",
+            description: 'Floor id like "A-Floor-1" or "all"'
+          }
+        }
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_visual_explanation_context",
+      description:
+        "Get the currently selected visual context for explanation. Use this when the user asks to explain the selected chart, KPI, calendar, card, or table.",
+      parameters: {
+        type: "object",
+        properties: {
+          visualId: {
+            type: "string",
+            description: "Optional visual id if known"
+          },
+          visualTitle: {
+            type: "string",
+            description: "Optional visual title if known"
+          }
+        }
+      }
+    }
   }
 ];
 
 function systemPrompt() {
   return `
-You are a Smart Hostel dashboard analytics assistant for the OWNER role.
+You are a friendly Smart Hostel dashboard assistant for the OWNER role.
 
-You answer questions using dashboard tools, not guesses.
+You are a visual analytics assistant, not only a Q&A bot.
+
+You must help with:
+1. Answering natural language questions about dashboard data
+2. Understanding the current dashboard context
+3. Explaining the currently selected visual using the actual available data
+4. Guiding the user on what to check next
+5. Supporting decision-oriented questions using backend-generated analytics
 
 Rules:
-- Always use tools when data is needed.
+- Use tools whenever data is needed.
+- Use the current dashboard context, including dashboard, selected floor, selected room, filters, and selected visual.
+- When explaining the selected visual, call get_visual_explanation_context and rely on the current dashboard state.
+- When explaining a selected visual, do not only say what the visual is.
+- You must also explain:
+  - what the available data shows
+  - what stands out
+  - any comparison or trend visible in the data
+  - why it matters
+- If the selected visual includes dataSummary or selectedItem, base the explanation on those values.
+- For decision-oriented questions, rely on backend-generated priorities, alerts, anomalies, and risk indicators.
 - Never invent values.
-- Use the current dashboard state when helpful.
-- For questions asking for analysis, comparison, trends, or explanation, answer directly without navigation actions.
-- Only include ACTION lines if the user explicitly asks to open, switch, go to, or show a floor or room.
-- Valid action lines are:
-ACTION: switch_floor=A-Floor-1
-ACTION: switch_room=A201
-- Ignore null or missing IDs.
+- Be friendly, clear, and slightly descriptive.
+- Only include ACTION lines if the user explicitly wants navigation.
 `;
+}
+
+function cleanupParsedArgs(parsedArgs) {
+  const cleaned = { ...parsedArgs };
+
+  Object.keys(cleaned).forEach((key) => {
+    if (cleaned[key] === "" || cleaned[key] === null) {
+      delete cleaned[key];
+    }
+  });
+
+  return cleaned;
+}
+
+function userExplicitlyWantsNavigation(message = "") {
+  const text = String(message).toLowerCase();
+  return (
+    text.includes("open ") ||
+    text.includes("go to ") ||
+    text.includes("switch to ") ||
+    text.includes("take me to ") ||
+    text.includes("show me ")
+  );
 }
 
 async function generateOwnerReply({ message, dashboardState }) {
   const floorId = dashboardState?.floorId || "all";
   const roomId = dashboardState?.roomId || "all";
+  const selectedVisual = dashboardState?.selectedVisual || null;
 
   const messages = [
     {
       role: "system",
       content: systemPrompt()
-    },
-    {
-      role: "system",
-      content:
-        'When a tool result directly answers the question, answer from the tool result exactly and do not say "no data" unless the tool result has null or empty data.'
     },
     {
       role: "user",
@@ -223,14 +315,14 @@ ${message}`
 
   if (!assistantMessage) {
     return {
-      reply: "I could not generate a response.",
+      reply: "Sorry, I couldn’t generate a response just now.",
       context_used: {}
     };
   }
 
   if (!assistantMessage.tool_calls || assistantMessage.tool_calls.length === 0) {
     return {
-      reply: assistantMessage.content || "I could not generate a response.",
+      reply: assistantMessage.content || "Sorry, I couldn’t generate a response just now.",
       context_used: {}
     };
   }
@@ -242,14 +334,17 @@ ${message}`
   for (const toolCall of assistantMessage.tool_calls) {
     const toolName = toolCall.function.name;
     const rawArgs = toolCall.function.arguments || "{}";
-    let parsedArgs = {};
 
+    let parsedArgs = {};
     try {
       parsedArgs = JSON.parse(rawArgs);
     } catch {
       parsedArgs = {};
     }
 
+    parsedArgs = cleanupParsedArgs(parsedArgs);
+
+    // Inject current dashboard context when the model omits it
     if (toolName === "get_rooms_overview" && !parsedArgs.floorId) {
       parsedArgs.floorId = floorId;
     }
@@ -274,20 +369,35 @@ ${message}`
       if (!parsedArgs.floorId) {
         parsedArgs.floorId = floorId;
       }
-
       if (!parsedArgs.roomId) {
         parsedArgs.roomId = roomId;
       }
     }
 
-    console.log("Tool requested:", toolName);
-    console.log("Parsed args:", parsedArgs);
+    if (toolName === "get_visual_explanation_context") {
+      if (!parsedArgs.visualId && selectedVisual?.id) {
+        parsedArgs.visualId = selectedVisual.id;
+      }
+
+      if (!parsedArgs.visualTitle && selectedVisual?.title) {
+        parsedArgs.visualTitle = selectedVisual.title;
+      }
+
+      parsedArgs.dashboardState = dashboardState;
+    }
+
+    if (toolName === "get_priority_summary" && !parsedArgs.floorId) {
+      parsedArgs.floorId = floorId;
+    }
+
+    if (toolName === "get_overview_snapshot" && !parsedArgs.floorId) {
+      parsedArgs.floorId = floorId;
+    }
 
     const impl = TOOL_IMPL[toolName];
     if (!impl) continue;
 
     const result = await impl(parsedArgs);
-    console.log("Tool result:", JSON.stringify(result, null, 2));
     toolResults[toolName] = result;
 
     messages.push({
@@ -297,16 +407,25 @@ ${message}`
     });
   }
 
+  const navigationAllowed = userExplicitlyWantsNavigation(message);
+
+  messages.push({
+    role: "system",
+    content: navigationAllowed
+      ? "The user explicitly wants navigation if relevant. You may include ACTION lines if they genuinely help."
+      : "The user did not explicitly ask for navigation. Do not include any ACTION lines. Just answer the question."
+  });
+
   const finalResponse = await groq.chat.completions.create({
     model: "llama-3.3-70b-versatile",
-    temperature: 0.2,
+    temperature: 0.25,
     messages
   });
 
   return {
     reply:
       finalResponse.choices?.[0]?.message?.content ||
-      "I could not generate a response.",
+      "Sorry, I couldn’t generate a response just now.",
     context_used: toolResults
   };
 }

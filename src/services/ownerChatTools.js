@@ -87,17 +87,54 @@ async function getTopWasteRoomsToday({ floorId = "all", limit = 5, date }) {
 }
 
 async function getHighestWastedRoom({ floorId = "all", date }) {
-  const latestDate = date || (await getLatestSummaryDate());
+  const scopeQuery = {};
+  if (floorId && floorId !== "all") {
+    scopeQuery.floor_id = floorId;
+  }
+
+  let targetDate = date;
+
+  // If model passes "today", blank, or something unusable, ignore it
+  if (!targetDate || String(targetDate).trim().toLowerCase() === "today") {
+    targetDate = null;
+  }
+
+  // Try requested date first if it exists
+  if (targetDate) {
+    const requestedQuery = { ...scopeQuery, date: targetDate };
+
+    const requestedRow = await DailyRoomSummary.findOne(requestedQuery)
+      .sort({ wasted_energy_kwh: -1, waste_ratio_percent: -1 })
+      .lean();
+
+    if (requestedRow) {
+      return {
+        date: targetDate,
+        room: {
+          room_id: requestedRow.room_id,
+          floor_id: requestedRow.floor_id,
+          total_energy_kwh: Number(requestedRow.total_energy_kwh || 0),
+          wasted_energy_kwh: Number(requestedRow.wasted_energy_kwh || 0),
+          waste_ratio_percent: Number(requestedRow.waste_ratio_percent || 0)
+        }
+      };
+    }
+  }
+
+  // Fallback: use latest available date within selected scope
+  const latestRow = await DailyRoomSummary.findOne(scopeQuery)
+    .sort({ date: -1 })
+    .lean();
+
+  const latestDate = latestRow?.date || null;
+
   if (!latestDate) {
     return { date: null, room: null };
   }
 
-  const query = { date: latestDate };
-  if (floorId && floorId !== "all") {
-    query.floor_id = floorId;
-  }
+  const latestQuery = { ...scopeQuery, date: latestDate };
 
-  const row = await DailyRoomSummary.findOne(query)
+  const row = await DailyRoomSummary.findOne(latestQuery)
     .sort({ wasted_energy_kwh: -1, waste_ratio_percent: -1 })
     .lean();
 
@@ -229,10 +266,8 @@ async function getActiveAlerts({ floorId = "all", roomId = "all", limit = 10 }) 
     .limit(Number(limit) || 10)
     .lean();
 
-  if (floorId && floorId !== "all") {
-    const allowedRooms = await DailyRoomSummary.distinct("room_id", {
-      floor_id: floorId
-    });
+  if (floorId && floorId !== "all" && roomId === "all") {
+    const allowedRooms = await DailyRoomSummary.distinct("room_id", { floor_id: floorId });
     alerts = alerts.filter((a) => allowedRooms.includes(a.room_id));
   }
 
@@ -247,6 +282,104 @@ async function getActiveAlerts({ floorId = "all", roomId = "all", limit = 10 }) 
   };
 }
 
+async function getOverviewSnapshot({ floorId = "all" }) {
+  const latestQuery = {};
+  if (floorId !== "all") {
+    latestQuery.floor_id = floorId;
+  }
+
+  const latestRow = await DailyRoomSummary.findOne(latestQuery)
+    .sort({ date: -1 })
+    .lean();
+
+  if (!latestRow) {
+    return { summary_date: null, rooms: [] };
+  }
+
+  const query = { date: latestRow.date };
+  if (floorId !== "all") {
+    query.floor_id = floorId;
+  }
+
+  const rows = await DailyRoomSummary.find(query).sort({ room_id: 1 }).lean();
+
+  return {
+    summary_date: latestRow.date,
+    rooms: rows.map((r) => ({
+      room_id: r.room_id,
+      floor_id: r.floor_id,
+      total_energy_kwh: Number(r.total_energy_kwh || 0),
+      wasted_energy_kwh: Number(r.wasted_energy_kwh || 0),
+      waste_ratio_percent: Number(r.waste_ratio_percent || 0),
+      critical_count: Number(r.critical_count || 0),
+      warning_count: Number(r.warning_count || 0)
+    }))
+  };
+}
+
+async function getPrioritySummary({ floorId = "all" }) {
+  const latestQuery = {};
+  if (floorId !== "all") {
+    latestQuery.floor_id = floorId;
+  }
+
+  const latestRow = await DailyRoomSummary.findOne(latestQuery)
+    .sort({ date: -1 })
+    .lean();
+
+  if (!latestRow) {
+    return { summary_date: null, priorities: [] };
+  }
+
+  const query = { date: latestRow.date };
+  if (floorId !== "all") {
+    query.floor_id = floorId;
+  }
+
+  const rows = await DailyRoomSummary.find(query).lean();
+
+  const priorities = rows
+    .map((r) => {
+      const wasteRatio = Number(r.waste_ratio_percent || 0);
+      const wastedEnergy = Number(r.wasted_energy_kwh || 0);
+      const priorityScore = wasteRatio * 0.6 + wastedEnergy * 100 * 0.4;
+
+      return {
+        room_id: r.room_id,
+        floor_id: r.floor_id,
+        waste_ratio_percent: wasteRatio,
+        wasted_energy_kwh: wastedEnergy,
+        priority_score: Number(priorityScore.toFixed(2))
+      };
+    })
+    .sort((a, b) => b.priority_score - a.priority_score);
+
+  return {
+    summary_date: latestRow.date,
+    priorities
+  };
+}
+
+async function getVisualExplanationContext({ visualId, visualTitle, dashboardState }) {
+  const visual = dashboardState?.selectedVisual || null;
+
+  if (!visual) {
+    return {
+      error: "No selected visual is available in the current dashboard context."
+    };
+  }
+
+  return {
+    visual_id: visual.id || visualId || null,
+    title: visual.title || visualTitle || null,
+    shortLabel: visual.shortLabel || null,
+    type: visual.type || null,
+    description: visual.description || null,
+    dataSummary: visual.dataSummary || null,
+    selectedItem: visual.selectedItem || null
+  };
+}
+
 module.exports = {
   getLatestSummaryDate,
   getFloorOverview,
@@ -255,5 +388,8 @@ module.exports = {
   getHighestWastedRoom,
   getRoomDetail,
   getWastePatternByWeekday,
-  getActiveAlerts
+  getActiveAlerts,
+  getOverviewSnapshot,
+  getPrioritySummary,
+  getVisualExplanationContext
 };
