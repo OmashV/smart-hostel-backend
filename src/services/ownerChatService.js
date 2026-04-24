@@ -3,6 +3,7 @@ const {
   getFloorOverview,
   getRoomsOverview,
   getTopWasteRoomsToday,
+  getHighestWastedRoom,
   getRoomDetail,
   getWastePatternByWeekday,
   getActiveAlerts
@@ -12,6 +13,7 @@ const TOOL_IMPL = {
   get_floor_overview: getFloorOverview,
   get_rooms_overview: getRoomsOverview,
   get_top_waste_rooms_today: getTopWasteRoomsToday,
+  get_highest_wasted_room: getHighestWastedRoom,
   get_room_detail: getRoomDetail,
   get_waste_pattern_by_weekday: getWastePatternByWeekday,
   get_active_alerts: getActiveAlerts
@@ -72,6 +74,27 @@ const TOOLS = [
           limit: {
             type: "number",
             description: "Number of rooms to return"
+          },
+          date: {
+            type: "string",
+            description: "Optional summary date in YYYY-MM-DD format"
+          }
+        }
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_highest_wasted_room",
+      description:
+        "Get the single room with the highest wasted energy for the latest summary date, optionally within a selected floor.",
+      parameters: {
+        type: "object",
+        properties: {
+          floorId: {
+            type: "string",
+            description: 'Floor id like "A-Floor-1" or "all"'
           },
           date: {
             type: "string",
@@ -150,25 +173,16 @@ You are a Smart Hostel dashboard analytics assistant for the OWNER role.
 
 You answer questions using dashboard tools, not guesses.
 
-You can help with:
-1. Floor-wise energy and waste comparison
-2. Room-wise comparison within a floor
-3. Highest waste rooms for the latest day
-4. Room detail, trends, alerts, anomalies, and forecast
-5. Weekday-based waste patterns for a room
-6. Dashboard guidance and drill-down suggestions
-
 Rules:
 - Always use tools when data is needed.
-- Use the current dashboard state when helpful.
-- Never say only one room exists unless the tool result actually shows only one room.
 - Never invent values.
-- If the user asks about weekday patterns, use the weekday-pattern tool.
-- If navigation would help, include action lines exactly like:
+- Use the current dashboard state when helpful.
+- For questions asking for analysis, comparison, trends, or explanation, answer directly without navigation actions.
+- Only include ACTION lines if the user explicitly asks to open, switch, go to, or show a floor or room.
+- Valid action lines are:
 ACTION: switch_floor=A-Floor-1
-ACTION: switch_room=A101
-- Ignore null or missing IDs in navigation suggestions.
-- Keep answers practical and tied to the dashboard.
+ACTION: switch_room=A201
+- Ignore null or missing IDs.
 `;
 }
 
@@ -180,6 +194,11 @@ async function generateOwnerReply({ message, dashboardState }) {
     {
       role: "system",
       content: systemPrompt()
+    },
+    {
+      role: "system",
+      content:
+        'When a tool result directly answers the question, answer from the tool result exactly and do not say "no data" unless the tool result has null or empty data.'
     },
     {
       role: "user",
@@ -239,6 +258,10 @@ ${message}`
       parsedArgs.floorId = floorId;
     }
 
+    if (toolName === "get_highest_wasted_room" && !parsedArgs.floorId) {
+      parsedArgs.floorId = floorId;
+    }
+
     if (toolName === "get_room_detail" && !parsedArgs.roomId && roomId !== "all") {
       parsedArgs.roomId = roomId;
     }
@@ -257,10 +280,14 @@ ${message}`
       }
     }
 
+    console.log("Tool requested:", toolName);
+    console.log("Parsed args:", parsedArgs);
+
     const impl = TOOL_IMPL[toolName];
     if (!impl) continue;
 
     const result = await impl(parsedArgs);
+    console.log("Tool result:", JSON.stringify(result, null, 2));
     toolResults[toolName] = result;
 
     messages.push({

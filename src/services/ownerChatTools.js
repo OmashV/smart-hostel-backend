@@ -86,6 +86,37 @@ async function getTopWasteRoomsToday({ floorId = "all", limit = 5, date }) {
   };
 }
 
+async function getHighestWastedRoom({ floorId = "all", date }) {
+  const latestDate = date || (await getLatestSummaryDate());
+  if (!latestDate) {
+    return { date: null, room: null };
+  }
+
+  const query = { date: latestDate };
+  if (floorId && floorId !== "all") {
+    query.floor_id = floorId;
+  }
+
+  const row = await DailyRoomSummary.findOne(query)
+    .sort({ wasted_energy_kwh: -1, waste_ratio_percent: -1 })
+    .lean();
+
+  if (!row) {
+    return { date: latestDate, room: null };
+  }
+
+  return {
+    date: latestDate,
+    room: {
+      room_id: row.room_id,
+      floor_id: row.floor_id,
+      total_energy_kwh: Number(row.total_energy_kwh || 0),
+      wasted_energy_kwh: Number(row.wasted_energy_kwh || 0),
+      waste_ratio_percent: Number(row.waste_ratio_percent || 0)
+    }
+  };
+}
+
 async function getRoomDetail({ roomId }) {
   if (!roomId || roomId === "all") {
     return { error: "roomId is required" };
@@ -221,6 +252,7 @@ module.exports = {
   getFloorOverview,
   getRoomsOverview,
   getTopWasteRoomsToday,
+  getHighestWastedRoom,
   getRoomDetail,
   getWastePatternByWeekday,
   getActiveAlerts

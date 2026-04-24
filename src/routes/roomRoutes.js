@@ -9,6 +9,7 @@ const {
   getOwnerPatterns,
   getOwnerForecasts,
   getOwnerRoomsOverview,
+  getOwnerOverviewSnapshot,
   getOwnerAlerts,
   getOwnerWeekdayPatterns,
   deleteOwnerAlert,
@@ -41,6 +42,7 @@ router.get("/floors/overview", getFloorOverview);
 router.get("/:roomId/latest-reading", getLatestReading);
 
 // owner
+router.get("/owner/overview-snapshot", getOwnerOverviewSnapshot);
 router.get("/owner/rooms-overview", getOwnerRoomsOverview);
 router.get("/owner/alerts", getOwnerAlerts);
 router.get("/owner/anomalies", getOwnerAnomalies);
