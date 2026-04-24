@@ -387,36 +387,36 @@ def train_weekly_patterns(df):
     def build_day_doc(room_id, day, day_df):
         if day_df.empty:
             return {
-                "room_id": room_id,
-                "day": day,
-                "day_type": "Weekend" if day in ["Saturday", "Sunday"] else "Weekday",
-                "cluster_id": -1,
-                "usual_pattern": "No Data",
-                "avg_occupancy": 0,
-                "avg_noise_level": 0,
-                "avg_warnings": 0,
-                "avg_critical_ratio": 0,
-                "record_count": 0,
-                "model_name": "KMeans",
-            }
-
+    "room_id": room_id,
+    "date": day,   # ✅ ADD THIS LINE
+    "day": day,
+    "day_type": "Weekend" if day in ["Saturday", "Sunday"] else "Weekday",
+    "cluster_id": -1,
+    "usual_pattern": "No Data",
+    "avg_occupancy": 0,
+    "avg_noise_level": 0,
+    "avg_warnings": 0,
+    "avg_critical_ratio": 0,
+    "record_count": 0,
+    "model_name": "KMeans",
+}
         cluster_id = int(day_df["cluster_id"].mode().iloc[0])
         critical_ratio = float((day_df["violation_count"].fillna(0) > 0).mean() * 100)
 
         return {
-            "room_id": room_id,
-            "day": day,
-            "day_type": "Weekend" if day in ["Saturday", "Sunday"] else "Weekday",
-            "cluster_id": cluster_id,
-            "usual_pattern": cluster_to_pattern.get(cluster_id, "Pattern Detected"),
-            "avg_occupancy": round(float(day_df["occupied_count"].mean()), 2),
-            "avg_noise_level": round(float(day_df["avg_sound_peak"].mean()), 2),
-            "avg_warnings": round(float(day_df["warning_count"].mean()), 2),
-            "avg_critical_ratio": round(critical_ratio, 2),
-            "record_count": int(len(day_df)),
-            "model_name": "KMeans",
-        }
-
+    "room_id": room_id,
+    "date": day,   # ✅ ADD THIS LINE
+    "day": day,
+    "day_type": "Weekend" if day in ["Saturday", "Sunday"] else "Weekday",
+    "cluster_id": cluster_id,
+    "usual_pattern": cluster_to_pattern.get(cluster_id, "Pattern Detected"),
+    "avg_occupancy": round(float(day_df["occupied_count"].mean()), 2),
+    "avg_noise_level": round(float(day_df["avg_sound_peak"].mean()), 2),
+    "avg_warnings": round(float(day_df["warning_count"].mean()), 2),
+    "avg_critical_ratio": round(critical_ratio, 2),
+    "record_count": int(len(day_df)),
+    "model_name": "KMeans",
+}
     for room_id in all_room_ids:
         room_df = df[df["room_id"].astype(str) == room_id]
         for day in ORDERED_DAYS:
