@@ -46,46 +46,53 @@ def safe_float(v, default=0.0):
         return default
 
 
-def load_source_dataframe():
-    hourly_docs = list(db.warden_hourly_summary.find({}, {"_id": 0}))
-    if hourly_docs:
-        df = pd.DataFrame(hourly_docs)
-        df = ensure_columns(df, {
-            "room_id": "Unknown", "date": None, "hour": 0,
-            "occupied_count": 0, "empty_count": 0, "sleeping_count": 0,
-            "warning_count": 0, "violation_count": 0, "complaint_count": 0,
-            "avg_sound_peak": 0, "avg_current": 0, "door_open_count": 0,
-            "inspection_count": 0,
-        })
-        df["date"] = pd.to_datetime(df["date"], errors="coerce")
-        df["hour"] = pd.to_numeric(df["hour"], errors="coerce").fillna(0).astype(int)
-        df["datetime"] = pd.to_datetime(df["date"].dt.strftime("%Y-%m-%d") + " " + df["hour"].astype(str) + ":00:00", errors="coerce")
-        df = df.dropna(subset=["datetime", "room_id"])
-        df["source_type"] = "warden_hourly_summary"
-        return df
+def _hourly_dataframe(hourly_docs):
+    if not hourly_docs:
+        return pd.DataFrame()
+    df = pd.DataFrame(hourly_docs)
+    df = ensure_columns(df, {
+        "room_id": "Unknown", "date": None, "hour": 0,
+        "occupied_count": 0, "empty_count": 0, "sleeping_count": 0,
+        "warning_count": 0, "violation_count": 0, "complaint_count": 0,
+        "avg_sound_peak": 0, "avg_current": 0, "door_open_count": 0,
+        "inspection_count": 0,
+    })
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df["hour"] = pd.to_numeric(df["hour"], errors="coerce").fillna(0).astype(int)
+    df["datetime"] = pd.to_datetime(
+        df["date"].dt.strftime("%Y-%m-%d") + " " + df["hour"].astype(str) + ":00:00",
+        errors="coerce"
+    )
+    df = df.dropna(subset=["datetime", "room_id"])
+    df["source_type"] = "warden_hourly_summary"
+    return df
 
-    daily_docs = list(db.daily_room_summary.find({}, {"_id": 0}))
-    if daily_docs:
-        df = pd.DataFrame(daily_docs)
-        df = ensure_columns(df, {
-            "room_id": "Unknown", "date": None,
-            "total_motion_count": 0, "avg_sound_peak": 0, "avg_current": 0,
-            "door_open_count": 0, "warning_count": 0, "critical_count": 0,
-        })
-        df["date"] = pd.to_datetime(df["date"], errors="coerce")
-        df = df.dropna(subset=["date", "room_id"])
-        df["hour"] = 12
-        df["datetime"] = df["date"] + pd.to_timedelta(df["hour"], unit="h")
-        df["occupied_count"] = pd.to_numeric(df["total_motion_count"], errors="coerce").fillna(0)
-        df["empty_count"] = 0
-        df["sleeping_count"] = 0
-        df["violation_count"] = pd.to_numeric(df["critical_count"], errors="coerce").fillna(0)
-        df["complaint_count"] = pd.to_numeric(df["warning_count"], errors="coerce").fillna(0)
-        df["inspection_count"] = df["warning_count"].fillna(0) + df["violation_count"].fillna(0)
-        df["source_type"] = "daily_room_summary"
-        return df
 
-    sensor_docs = list(db.sensorreadings.find({}, {"_id": 0}))
+def _daily_dataframe(daily_docs):
+    if not daily_docs:
+        return pd.DataFrame()
+    df = pd.DataFrame(daily_docs)
+    df = ensure_columns(df, {
+        "room_id": "Unknown", "date": None,
+        "total_motion_count": 0, "avg_sound_peak": 0, "avg_current": 0,
+        "door_open_count": 0, "warning_count": 0, "critical_count": 0,
+    })
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df = df.dropna(subset=["date", "room_id"])
+    df["hour"] = 12
+    df["datetime"] = df["date"] + pd.to_timedelta(df["hour"], unit="h")
+    df["occupied_count"] = pd.to_numeric(df["total_motion_count"], errors="coerce").fillna(0)
+    df["empty_count"] = 0
+    df["sleeping_count"] = 0
+    df["violation_count"] = pd.to_numeric(df["critical_count"], errors="coerce").fillna(0)
+    df["warning_count"] = pd.to_numeric(df["warning_count"], errors="coerce").fillna(0)
+    df["complaint_count"] = df["warning_count"]
+    df["inspection_count"] = df["warning_count"].fillna(0) + df["violation_count"].fillna(0)
+    df["source_type"] = "daily_room_summary"
+    return df
+
+
+def _sensor_dataframe(sensor_docs):
     if not sensor_docs:
         return pd.DataFrame()
     raw = pd.DataFrame(sensor_docs)
@@ -115,6 +122,46 @@ def load_source_dataframe():
     df["source_type"] = "sensorreadings"
     return df
 
+
+def load_source_dataframe():
+    """Load the same integrated data foundation Owner uses.
+
+    Important: warden_hourly_summary may only exist for raw IoT rooms such as A101.
+    daily_room_summary may contain Owner-style/synthetic rooms such as A102/A103/A201.
+    Therefore this function MUST NOT return immediately when hourly rows exist.
+    It merges the strongest available source per room:
+      - hourly summary for rooms that have it,
+      - daily room summary for rooms missing from hourly,
+      - raw sensor aggregation for any remaining rooms.
+    """
+    hourly_df = _hourly_dataframe(list(db.warden_hourly_summary.find({}, {"_id": 0})))
+    daily_df = _daily_dataframe(list(db.daily_room_summary.find({}, {"_id": 0})))
+    sensor_df = _sensor_dataframe(list(db.sensorreadings.find({}, {"_id": 0})))
+
+    frames = []
+    used_rooms = set()
+
+    if not hourly_df.empty:
+        frames.append(hourly_df)
+        used_rooms.update(hourly_df["room_id"].astype(str).unique())
+
+    if not daily_df.empty:
+        missing_daily = daily_df[~daily_df["room_id"].astype(str).isin(used_rooms)].copy()
+        if not missing_daily.empty:
+            frames.append(missing_daily)
+            used_rooms.update(missing_daily["room_id"].astype(str).unique())
+
+    if not sensor_df.empty:
+        missing_sensor = sensor_df[~sensor_df["room_id"].astype(str).isin(used_rooms)].copy()
+        if not missing_sensor.empty:
+            frames.append(missing_sensor)
+
+    if not frames:
+        return pd.DataFrame()
+
+    merged = pd.concat(frames, ignore_index=True, sort=False)
+    merged["source_type"] = merged["source_type"].fillna("integrated_mongodb")
+    return merged
 
 def add_time_features(df):
     df = df.copy()
@@ -215,6 +262,14 @@ def train_anomalies_and_alerts(df):
 
 
 def train_weekly_patterns(df):
+    # Older builds created a unique MongoDB index on {room_id, date}.
+    # Weekly pattern rows are keyed by {room_id, day}, so remove the old index if it exists.
+    try:
+        existing_indexes = db.warden_patterns.index_information()
+        if "room_id_1_date_1" in existing_indexes:
+            db.warden_patterns.drop_index("room_id_1_date_1")
+    except Exception as e:
+        print("warden_patterns old index cleanup skipped", e)
     db.warden_patterns.delete_many({})
     features = ["occupied_count", "avg_sound_peak", "warning_count", "violation_count", "inspection_count", "avg_current"]
     if len(df) < 8:
@@ -230,9 +285,9 @@ def train_weekly_patterns(df):
     docs = []
     def doc(room_id, day, day_df):
         if day_df.empty:
-            return {"room_id": room_id, "day": day, "day_type": "Weekend" if day in ["Saturday", "Sunday"] else "Weekday", "usual_pattern": "No Data", "avg_occupancy": 0, "avg_noise_level": 0, "avg_warnings": 0, "avg_critical_ratio": 0, "cluster_id": -1, "record_count": 0, "model_name": "KMeans"}
+            return {"room_id": room_id, "day": day, "date": day, "day_type": "Weekend" if day in ["Saturday", "Sunday"] else "Weekday", "usual_pattern": "No Data", "avg_occupancy": 0, "avg_noise_level": 0, "avg_warnings": 0, "avg_critical_ratio": 0, "cluster_id": -1, "record_count": 0, "model_name": "KMeans"}
         cid = int(day_df["cluster_id"].mode().iloc[0])
-        return {"room_id": room_id, "day": day, "day_type": "Weekend" if day in ["Saturday", "Sunday"] else "Weekday", "usual_pattern": cluster_label.get(cid, "Pattern Detected"), "avg_occupancy": round(float(day_df["occupied_count"].mean()), 2), "avg_noise_level": round(float(day_df["avg_sound_peak"].mean()), 2), "avg_warnings": round(float(day_df["warning_count"].mean()), 2), "avg_critical_ratio": round(float((day_df["violation_count"].fillna(0) > 0).mean() * 100), 2), "cluster_id": cid, "record_count": int(len(day_df)), "model_name": "KMeans"}
+        return {"room_id": room_id, "day": day, "date": day, "day_type": "Weekend" if day in ["Saturday", "Sunday"] else "Weekday", "usual_pattern": cluster_label.get(cid, "Pattern Detected"), "avg_occupancy": round(float(day_df["occupied_count"].mean()), 2), "avg_noise_level": round(float(day_df["avg_sound_peak"].mean()), 2), "avg_warnings": round(float(day_df["warning_count"].mean()), 2), "avg_critical_ratio": round(float((day_df["violation_count"].fillna(0) > 0).mean() * 100), 2), "cluster_id": cid, "record_count": int(len(day_df)), "model_name": "KMeans"}
     for room_id in sorted(work["room_id"].astype(str).unique()):
         room_df = work[work["room_id"].astype(str) == room_id]
         for day in ORDERED_DAYS:
@@ -249,7 +304,7 @@ def main():
         print("No data found in warden_hourly_summary, daily_room_summary, or sensorreadings")
         return
     df = add_time_features(df).sort_values(["room_id", "datetime"])
-    print("Rows:", len(df), "Rooms:", df["room_id"].nunique(), "Source:", df["source_type"].iloc[0])
+    print("Rows:", len(df), "Rooms:", df["room_id"].nunique(), "Sources:", sorted(df["source_type"].astype(str).unique()))
     train_forecasts(df)
     train_anomalies_and_alerts(df)
     train_weekly_patterns(df)

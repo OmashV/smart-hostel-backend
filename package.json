@@ -13,7 +13,7 @@
     "build:daily-floor-summary": "node scripts/buildDailyFloorSummary.js",
     "backfill:daily-floorid": "node scripts/backfillFloorIdToDailyRoomSummary.js",
     "build:warden-hourly-summary": "node scripts/buildWardenHourlySummary.js",
-"ml:warden": "python ml/warden_analysis.py"
+    "ml:warden": "python ml/warden_analysis.py"
   },
   "dependencies": {
     "cors": "^2.8.5",
