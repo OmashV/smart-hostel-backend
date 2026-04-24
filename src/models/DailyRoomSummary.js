@@ -3,6 +3,7 @@ const mongoose = require("mongoose");
 const DailyRoomSummarySchema = new mongoose.Schema(
   {
     room_id: { type: String, required: true, index: true },
+    floor_id: { type: String, required: true, index: true },
     date: { type: String, required: true, index: true },
 
     total_energy_kwh: { type: Number, default: 0 },
