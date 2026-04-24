@@ -10,10 +10,9 @@ const WardenForecast = require("../models/WardenForecast");
 const WardenFeatureImportance = require("../models/WardenFeatureImportance");
 const WardenAnomaly = require("../models/WardenAnomaly");
 const WardenPattern = require("../models/WardenPattern");
+const WardenMlAlert = require("../models/WardenMlAlert");
 const SecurityForecast = require("../models/SecurityForecast");
 const SecurityAnomaly = require("../models/SecurityAnomaly");
-const DemoSecurityReading = require("../models/DemoSecurityReading");
-const { getSecuritySource, REAL_ROOM } = require("../utils/securityReadingSource");
 
 
 const TIMEZONE = "Asia/Colombo";
@@ -690,163 +689,104 @@ async function getOwnerForecasts(req, res) {
 }
 // ================= WARDEN =================
 
+
+function buildRoomFilter(roomId) {
+  if (!roomId || roomId === "All" || roomId === "all") return {};
+  return { room_id: roomId };
+}
+
 async function getWardenSummary(req, res) {
   try {
+    const { roomId = "All" } = req.query;
+    const roomFilter = buildRoomFilter(roomId);
     const latestPerRoom = await SensorReading.aggregate([
+      { $match: roomFilter },
       { $sort: { room_id: 1, captured_at: -1 } },
-      {
-        $group: {
-          _id: "$room_id",
-          latest: { $first: "$$ROOT" }
-        }
-      },
+      { $group: { _id: "$room_id", latest: { $first: "$$ROOT" } } },
       { $replaceRoot: { newRoot: "$latest" } }
     ]);
-
-    const summary = {
-      occupied_rooms: 0,
-      empty_rooms: 0,
-      sleeping_rooms: 0,
-      noise_issue_rooms: 0,
-      rooms_needing_inspection: 0
-    };
-
+    const activeAlerts = await WardenMlAlert.countDocuments({ ...roomFilter, status: "Active" });
+    const inspectionRooms = await WardenMlAlert.distinct("room_id", { ...roomFilter, status: "Active" });
+    const summary = { total_rooms: latestPerRoom.length, occupied_rooms: 0, empty_rooms: 0, sleeping_rooms: 0, active_alerts: activeAlerts, rooms_needing_inspection: inspectionRooms.length, avg_noise_level: 0, total_records: await SensorReading.countDocuments(roomFilter) };
+    let noiseTotal = 0;
     for (const room of latestPerRoom) {
-      if (room.occupancy_stat === "Occupied") summary.occupied_rooms++;
-      else if (room.occupancy_stat === "Empty") summary.empty_rooms++;
-      else if (room.occupancy_stat === "Sleeping") summary.sleeping_rooms++;
-
-      if (room.noise_stat === "Warning" || room.noise_stat === "Violation") {
-        summary.noise_issue_rooms++;
-      }
-
-      if (
-        room.waste_stat === "Critical" ||
-        room.noise_stat === "Violation" ||
-        room.sensor_faults?.pir ||
-        room.sensor_faults?.door ||
-        room.sensor_faults?.sound ||
-        room.sensor_faults?.current
-      ) {
-        summary.rooms_needing_inspection++;
-      }
+      if (room.occupancy_stat === "Occupied") summary.occupied_rooms += 1;
+      if (room.occupancy_stat === "Empty") summary.empty_rooms += 1;
+      if (room.occupancy_stat === "Sleeping") summary.sleeping_rooms += 1;
+      noiseTotal += Number(room.sound_peak || 0);
     }
-
+    summary.avg_noise_level = latestPerRoom.length ? Number((noiseTotal / latestPerRoom.length).toFixed(2)) : 0;
     res.json(summary);
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
+  } catch (error) { res.status(500).json({ message: error.message }); }
 }
 
 async function getWardenRoomsStatus(req, res) {
   try {
+    const { roomId = "All" } = req.query;
     const rooms = await SensorReading.aggregate([
+      { $match: buildRoomFilter(roomId) },
       { $sort: { room_id: 1, captured_at: -1 } },
-      {
-        $group: {
-          _id: "$room_id",
-          latest: { $first: "$$ROOT" }
-        }
-      },
-      {
-        $project: {
-          _id: 0,
-          room_id: "$latest.room_id",
-          occupancy_stat: "$latest.occupancy_stat",
-          noise_stat: "$latest.noise_stat",
-          waste_stat: "$latest.waste_stat",
-          door_status: "$latest.door_status",
-          current_amp: "$latest.current_amp",
-          captured_at: "$latest.captured_at"
-        }
-      },
+      { $group: { _id: "$room_id", latest: { $first: "$$ROOT" } } },
+      { $replaceRoot: { newRoot: "$latest" } },
+      { $lookup: { from: "warden_ml_alerts", let: { room: "$room_id" }, pipeline: [ { $match: { $expr: { $eq: ["$room_id", "$$room"] }, status: "Active" } }, { $sort: { captured_at: -1 } }, { $limit: 3 } ], as: "active_alerts" } },
+      { $project: { _id: 0, room_id: 1, device_id: 1, occupancy_stat: 1, noise_stat: 1, waste_stat: 1, door_status: 1, sound_peak: 1, current_amp: 1, motion_count: 1, interval_energy_kwh: 1, sensor_faults: 1, captured_at: 1, active_alert_count: { $size: "$active_alerts" }, latest_alert: { $arrayElemAt: ["$active_alerts", 0] }, needs_inspection: { $gt: [{ $size: "$active_alerts" }, 0] } } },
       { $sort: { room_id: 1 } }
     ]);
-
     res.json({ rooms });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
+  } catch (error) { res.status(500).json({ message: error.message }); }
 }
 
-async function getWardenNoiseIssues(req, res) {
+async function getWardenMlAlerts(req, res) {
   try {
-    const rooms = await SensorReading.aggregate([
-      {
-        $match: {
-          noise_stat: { $in: ["Warning", "Violation"] }
-        }
-      },
-      { $sort: { room_id: 1, captured_at: -1 } },
-      {
-        $group: {
-          _id: "$room_id",
-          latest: { $first: "$$ROOT" },
-          issue_count: { $sum: 1 }
-        }
-      },
-      {
-        $project: {
-          _id: 0,
-          room_id: "$_id",
-          issue_count: 1,
-          latest_noise_stat: "$latest.noise_stat",
-          latest_sound_peak: "$latest.sound_peak",
-          latest_captured_at: "$latest.captured_at"
-        }
-      },
-      { $sort: { issue_count: -1 } }
-    ]);
-
-    res.json({ rooms });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
+    const { roomId = "All", limit = 20 } = req.query;
+    const items = await WardenMlAlert.find({ ...buildRoomFilter(roomId), status: "Active" }).sort({ captured_at: -1 }).limit(Number(limit)).lean();
+    res.json({ items });
+  } catch (error) { res.status(500).json({ message: error.message }); }
 }
+
+async function getWardenNoiseIssues(req, res) { return getWardenMlAlerts(req, res); }
 
 async function getWardenFeatureImportance(req, res) {
-  try {
-    const items = await WardenFeatureImportance.find().sort({ importance: -1 }).lean();
-    res.json({ items });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
+  try { const items = await WardenFeatureImportance.find().sort({ importance: -1 }).lean(); res.json({ items }); }
+  catch (error) { res.status(500).json({ message: error.message }); }
 }
 
 async function getWardenAnomalies(req, res) {
-  try {
-    const items = await WardenAnomaly.find()
-      .sort({ date: -1 })
-      .lean();
-
-    res.json({ items });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
+  try { const { roomId = "All", limit = 30 } = req.query; const items = await WardenAnomaly.find(buildRoomFilter(roomId)).sort({ date: -1 }).limit(Number(limit)).lean(); res.json({ items }); }
+  catch (error) { res.status(500).json({ message: error.message }); }
 }
 
 async function getWardenPatterns(req, res) {
-  try {
-    const items = await WardenPattern.find()
-      .sort({ date: -1 })
-      .lean();
-
-    res.json({ items });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
+  try { const { roomId = "All" } = req.query; const order = { Monday: 1, Tuesday: 2, Wednesday: 3, Thursday: 4, Friday: 5, Saturday: 6, Sunday: 7 }; const items = await WardenPattern.find(buildRoomFilter(roomId)).lean(); items.sort((a, b) => (order[a.day] || 99) - (order[b.day] || 99)); res.json({ items }); }
+  catch (error) { res.status(500).json({ message: error.message }); }
 }
 
 async function getWardenForecasts(req, res) {
-  try {
-    const items = await WardenForecast.find()
-      .sort({ date: 1 })
-      .lean();
+  try { const { roomId = "All" } = req.query; const items = await WardenForecast.find(buildRoomFilter(roomId)).sort({ date: 1 }).lean(); res.json({ items }); }
+  catch (error) { res.status(500).json({ message: error.message }); }
+}
 
+async function getWardenHistory(req, res) {
+  try {
+    const { roomId = "All", days = 7 } = req.query;
+    const since = new Date(); since.setDate(since.getDate() - Number(days));
+    const items = await SensorReading.aggregate([
+      { $match: { ...buildRoomFilter(roomId), captured_at: { $gte: since } } },
+      { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$captured_at", timezone: TIMEZONE } }, actual_occupancy: { $sum: { $cond: [{ $in: ["$occupancy_stat", ["Occupied", "Sleeping"]] }, 1, 0] } }, actual_warnings: { $sum: { $cond: [{ $in: ["$noise_stat", ["Warning", "Violation"]] }, 1, 0] } }, avg_noise_level: { $avg: "$sound_peak" }, avg_current: { $avg: "$current_amp" }, records: { $sum: 1 } } },
+      { $project: { _id: 0, date: "$_id", actual_occupancy: { $round: ["$actual_occupancy", 2] }, actual_warnings: { $round: ["$actual_warnings", 2] }, avg_noise_level: { $round: ["$avg_noise_level", 2] }, avg_current: { $round: ["$avg_current", 3] }, records: 1 } },
+      { $sort: { date: 1 } }
+    ]);
     res.json({ items });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
+  } catch (error) { res.status(500).json({ message: error.message }); }
+}
+
+async function getWardenDataRange(req, res) {
+  try {
+    const { roomId = "All" } = req.query;
+    const agg = await SensorReading.aggregate([{ $match: buildRoomFilter(roomId) }, { $group: { _id: null, total_records: { $sum: 1 }, first_timestamp: { $min: "$captured_at" }, last_timestamp: { $max: "$captured_at" }, rooms: { $addToSet: "$room_id" }, devices: { $addToSet: "$device_id" } } }]);
+    const row = agg[0] || {}; const first = row.first_timestamp ? new Date(row.first_timestamp) : null; const last = row.last_timestamp ? new Date(row.last_timestamp) : null; const totalDays = first && last ? Math.max(1, Math.ceil((last - first) / 86400000) + 1) : 0;
+    res.json({ total_records: row.total_records || 0, first_timestamp: row.first_timestamp || null, last_timestamp: row.last_timestamp || null, total_days_covered: totalDays, total_rooms: row.rooms?.length || 0, total_devices: row.devices?.length || 0, validity_status: totalDays >= 5 ? "Valid: minimum 5–7 days available" : "Invalid: fewer than 5 days available" });
+  } catch (error) { res.status(500).json({ message: error.message }); }
 }
 
 async function getOwnerFeatureImportance(req, res) {
@@ -879,62 +819,35 @@ async function getOwnerAnomalies(req, res) {
 
 
 // ================= SECURITY =================
-
-
-// ── Helpers to query both collections ────────────────────────────────────────
-async function aggregateBothSources(pipeline) {
-  const [real, demo] = await Promise.all([
-    SensorReading.aggregate(pipeline),
-    DemoSecurityReading.aggregate(pipeline)
-  ]);
-  return [...real, ...demo];
-}
-
-async function findBothSources(query, options = {}) {
-  const [real, demo] = await Promise.all([
-    SensorReading.find(query)
-      .sort(options.sort || {})
-      .limit(options.limit || 0)
-      .select(options.select || "")
-      .lean(),
-    DemoSecurityReading.find(query)
-      .sort(options.sort || {})
-      .limit(options.limit || 0)
-      .select(options.select || "")
-      .lean()
-  ]);
-  return [...real, ...demo];
-}
-
-function pickSource(roomId) {
-  if (!roomId) return null;                                           // needs merge
-  return roomId === REAL_ROOM ? SensorReading : DemoSecurityReading;
-}
-
-// ── getSecuritySummary ────────────────────────────────────────────────────────
 async function getSecuritySummary(req, res) {
   try {
     const { roomId } = req.query;
 
     const pipeline = [];
-    if (roomId) pipeline.push({ $match: { room_id: roomId } });
+
+    if (roomId) {
+      pipeline.push({ $match: { room_id: roomId } });
+    }
 
     pipeline.push(
       { $sort: { room_id: 1, captured_at: -1 } },
-      { $group: { _id: "$room_id", latest: { $first: "$$ROOT" } } },
+      {
+        $group: {
+          _id: "$room_id",
+          latest: { $first: "$$ROOT" }
+        }
+      },
       { $replaceRoot: { newRoot: "$latest" } }
     );
 
-    const latestPerRoom = roomId
-      ? await pickSource(roomId).aggregate(pipeline)
-      : await aggregateBothSources(pipeline);
+    const latestPerRoom = await SensorReading.aggregate(pipeline);
 
     const summary = {
       active_security_alerts: 0,
-      suspicious_rooms:       0,
-      door_open_rooms:        0,
-      high_risk_rooms:        0,
-      after_hours_events:     0
+      suspicious_rooms: 0,
+      door_open_rooms: 0,
+      high_risk_rooms: 0,
+      after_hours_events: 0
     };
 
     for (const room of latestPerRoom) {
@@ -945,18 +858,22 @@ async function getSecuritySummary(req, res) {
         (room.motion_count > 0 && isAfterHours);
 
       let riskScore = 0;
+
       if (room.door_status === "Open" && room.door_stable_ms > 1800000) riskScore += 3;
       else if (room.door_status === "Open" && room.door_stable_ms > 600000) riskScore += 2;
-      if (room.motion_count === 0)         riskScore += 1;
-      if (isAfterHours)                    riskScore += 2;
+
+      if (room.motion_count === 0) riskScore += 1;
+      if (isAfterHours) riskScore += 2;
       if (room.occupancy_stat === "Empty") riskScore += 2;
 
       if (room.door_status === "Open") summary.door_open_rooms++;
-      if (isAfterHours)                summary.after_hours_events++;
+      if (isAfterHours) summary.after_hours_events++;
+
       if (suspicious) {
         summary.suspicious_rooms++;
         summary.active_security_alerts++;
       }
+
       if (riskScore >= 4) summary.high_risk_rooms++;
     }
 
@@ -966,17 +883,24 @@ async function getSecuritySummary(req, res) {
   }
 }
 
-// ── getSecuritySuspiciousRooms ────────────────────────────────────────────────
 async function getSecuritySuspiciousRooms(req, res) {
   try {
     const { roomId } = req.query;
 
     const pipeline = [];
-    if (roomId) pipeline.push({ $match: { room_id: roomId } });
+
+    if (roomId) {
+      pipeline.push({ $match: { room_id: roomId } });
+    }
 
     pipeline.push(
       { $sort: { room_id: 1, captured_at: -1 } },
-      { $group: { _id: "$room_id", latest: { $first: "$$ROOT" } } },
+      {
+        $group: {
+          _id: "$room_id",
+          latest: { $first: "$$ROOT" }
+        }
+      },
       { $replaceRoot: { newRoot: "$latest" } },
       {
         $addFields: {
@@ -1007,19 +931,17 @@ async function getSecuritySuspiciousRooms(req, res) {
       {
         $project: {
           _id: 0,
-          room_id:       1,
-          door_status:   1,
+          room_id: 1,
+          door_status: 1,
           door_stable_ms: 1,
-          motion_count:  1,
-          hour:          1,
-          captured_at:   1
+          motion_count: 1,
+          hour: 1,
+          captured_at: 1
         }
       }
     );
 
-    const rooms = roomId
-      ? await pickSource(roomId).aggregate(pipeline)
-      : await aggregateBothSources(pipeline);
+    const rooms = await SensorReading.aggregate(pipeline);
 
     res.json({ rooms });
   } catch (error) {
@@ -1027,35 +949,23 @@ async function getSecuritySuspiciousRooms(req, res) {
   }
 }
 
-// ── getSecurityDoorEvents ─────────────────────────────────────────────────────
 async function getSecurityDoorEvents(req, res) {
   try {
     const { roomId } = req.query;
     const limit = Number(req.query.limit || 50);
 
-    const query  = { door_status: "Open" };
-    if (roomId) query.room_id = roomId;
+    const query = {
+      door_status: "Open"
+    };
 
-    const selectFields = "room_id captured_at door_status door_stable_ms motion_count hour minute second -_id";
-
-    let events;
     if (roomId) {
-      events = await pickSource(roomId)
-        .find(query)
-        .sort({ captured_at: -1 })
-        .limit(limit)
-        .select(selectFields)
-        .lean();
-    } else {
-      const all = await findBothSources(query, {
-        sort:   { captured_at: -1 },
-        limit,
-        select: selectFields
-      });
-      events = all
-        .sort((a, b) => new Date(b.captured_at) - new Date(a.captured_at))
-        .slice(0, limit);
+      query.room_id = roomId;
     }
+
+    const events = await SensorReading.find(query)
+      .sort({ captured_at: -1 })
+      .limit(limit)
+      .select("room_id captured_at door_status door_stable_ms motion_count hour minute second -_id");
 
     res.json({ events });
   } catch (error) {
@@ -1063,7 +973,6 @@ async function getSecurityDoorEvents(req, res) {
   }
 }
 
-// ── getSecurityTrend ──────────────────────────────────────────────────────────
 async function getSecurityTrend(req, res) {
   try {
     const { roomId } = req.query;
@@ -1083,7 +992,7 @@ async function getSecurityTrend(req, res) {
     };
     if (roomId) actualMatch.room_id = roomId;
 
-    const actualGroupPipeline = [
+    const actualReadings = await SensorReading.aggregate([
       { $match: actualMatch },
       {
         $group: {
@@ -1095,71 +1004,34 @@ async function getSecurityTrend(req, res) {
           latest_captured_at:    { $max: "$captured_at" }
         }
       }
-    ];
+    ]);
 
-    const actualReadingsRaw = roomId
-      ? await pickSource(roomId).aggregate(actualGroupPipeline)
-      : await aggregateBothSources(actualGroupPipeline);
-
-    // If merged, re-group by hour across both sources
-    const actualByHour = {};
-    for (const item of actualReadingsRaw) {
-      const h = item._id;
-      if (!actualByHour[h]) {
-        actualByHour[h] = { sum: 0, count: 0, latest: null };
-      }
-      actualByHour[h].sum   += (item.actual_door_stable_ms || 0) * (item.sample_count || 1);
-      actualByHour[h].count += item.sample_count || 1;
-      if (!actualByHour[h].latest || item.latest_captured_at > actualByHour[h].latest) {
-        actualByHour[h].latest = item.latest_captured_at;
-      }
-    }
-
-    const actualMap = {};
-    for (const [h, val] of Object.entries(actualByHour)) {
-      actualMap[Number(h)] = {
-        actual_door_stable_ms: val.sum / val.count,
-        sample_count:          val.count,
-        latest_captured_at:    val.latest
-      };
-    }
-
-    // ── Step 2b: Historical fallback ───────────────────────────────────────
+    // ── Step 2b: Historical fallback — all-time average per hour ───────────
     const historicalMatch = { door_stable_ms: { $gt: 0 } };
     if (roomId) historicalMatch.room_id = roomId;
 
-    const historicalGroupPipeline = [
+    const historicalReadings = await SensorReading.aggregate([
       { $match: historicalMatch },
       {
         $group: {
           _id: {
             $hour: { date: "$captured_at", timezone: "Asia/Colombo" }
           },
-          historical_avg_ms: { $avg: "$door_stable_ms" },
-          count:             { $sum: 1 }
+          historical_avg_ms: { $avg: "$door_stable_ms" }
         }
       }
-    ];
+    ]);
 
-    const historicalReadingsRaw = roomId
-      ? await pickSource(roomId).aggregate(historicalGroupPipeline)
-      : await aggregateBothSources(historicalGroupPipeline);
-
-    // Re-group historical across both sources
-    const historicalByHour = {};
-    for (const item of historicalReadingsRaw) {
-      const h = item._id;
-      if (!historicalByHour[h]) {
-        historicalByHour[h] = { sum: 0, count: 0 };
-      }
-      historicalByHour[h].sum   += (item.historical_avg_ms || 0) * (item.count || 1);
-      historicalByHour[h].count += item.count || 1;
-    }
+    // ── Step 2c: Build lookup maps ─────────────────────────────────────────
+    const actualMap = {};
+    actualReadings.forEach((item) => {
+      actualMap[item._id] = item;
+    });
 
     const historicalMap = {};
-    for (const [h, val] of Object.entries(historicalByHour)) {
-      historicalMap[Number(h)] = val.sum / val.count;
-    }
+    historicalReadings.forEach((item) => {
+      historicalMap[item._id] = item.historical_avg_ms;
+    });
 
     // ── Step 3: Pull Prophet forecasts ─────────────────────────────────────
     const forecastQuery = { model_name: "prophet" };
@@ -1169,12 +1041,12 @@ async function getSecurityTrend(req, res) {
       .sort({ hour: 1 })
       .lean();
 
-    // ── Step 4: Current hour in Colombo ────────────────────────────────────
+    // ── Step 4: Get current hour in Colombo timezone ───────────────────────
     const currentHour = Number(
       new Intl.DateTimeFormat("en-US", {
         timeZone: "Asia/Colombo",
-        hour:     "numeric",
-        hour12:   false
+        hour: "numeric",
+        hour12: false
       }).format(new Date())
     );
 
@@ -1182,30 +1054,32 @@ async function getSecurityTrend(req, res) {
     const hours = forecasts.length
       ? forecasts
       : Array.from({ length: 24 }, (_, i) => ({
-          hour:                     i,
-          hour_label:               `${i}:00`,
+          hour: i,
+          hour_label: `${i}:00`,
           expected_door_stable_ms:  null,
           expected_door_stable_min: null,
-          lower_bound_ms:           null,
-          upper_bound_ms:           null
+          lower_bound_ms: null,
+          upper_bound_ms: null
         }));
 
-    // ── Step 6: Merge into trend array ─────────────────────────────────────
-    const trend = hours.map((forecast) => {
-      const hour         = forecast.hour;
-      const isFutureHour = hour > currentHour;
-      const actual       = actualMap[hour];
+    // ── Step 5: Merge everything into trend array ───────────────────────────
+   const trend = hours.map((forecast) => {
+      const hour   = forecast.hour;
+      const isFutureHour = hour > currentHour;   // ← key check
 
+      const actual = actualMap[hour];
+
+      // Future hours — no actual data regardless of what's in the map
       const isLiveData = !isFutureHour && !!actual;
-      const actualMs   = isFutureHour
-        ? null
+      const actualMs = isFutureHour
+        ? null                                    // ← null for future hours
         : actual
         ? Math.round(actual.actual_door_stable_ms)
-        : historicalMap[hour] != null
+        : historicalMap[hour]
         ? Math.round(historicalMap[hour])
         : null;
 
-      const expectedMs  = forecast.expected_door_stable_ms
+      const expectedMs = forecast.expected_door_stable_ms
         ? Math.round(forecast.expected_door_stable_ms)
         : null;
 
@@ -1213,6 +1087,7 @@ async function getSecurityTrend(req, res) {
         ? actualMs - expectedMs
         : null;
 
+      // Trend status — only when both values are present and it's live data
       let trend_status = "No Data";
       if (actualMs != null && expectedMs != null) {
         if (!isLiveData) {
@@ -1235,6 +1110,7 @@ async function getSecurityTrend(req, res) {
         hour_label:  forecast.hour_label || `${hour}:00`,
         date:        today,
 
+        // Actual — live today or historical fallback
         actual_door_stable_ms:  actualMs,
         actual_door_stable_min: actualMs != null
           ? Number((actualMs / 60000).toFixed(2))
@@ -1243,6 +1119,7 @@ async function getSecurityTrend(req, res) {
         sample_count:       actual?.sample_count || 0,
         latest_captured_at: actual?.latest_captured_at || null,
 
+        // Prophet ML values
         expected_door_stable_ms:  expectedMs,
         expected_door_stable_min: expectedMs != null
           ? Number((expectedMs / 60000).toFixed(2))
@@ -1254,6 +1131,7 @@ async function getSecurityTrend(req, res) {
           ? Math.round(forecast.upper_bound_ms)
           : null,
 
+        // Deviation
         deviation_ms:  deviationMs,
         deviation_min: deviationMs != null
           ? Number((deviationMs / 60000).toFixed(2))
@@ -1279,17 +1157,17 @@ async function getSecurityTrend(req, res) {
   }
 }
 
-// ── getSecurityAnomalies ──────────────────────────────────────────────────────
 async function getSecurityAnomalies(req, res) {
   try {
     const { roomId } = req.query;
     const limit = Number(req.query.limit || 50);
 
+    // Step 1: Pull Isolation Forest anomalies from ML collection
     const anomalyQuery = { model_name: "isolation_forest" };
     if (roomId) anomalyQuery.room_id = roomId;
 
     const mlAnomalies = await SecurityAnomaly.find(anomalyQuery)
-      .sort({ anomaly_score: 1 })
+      .sort({ anomaly_score: 1 })       // most anomalous first (most negative score)
       .limit(limit)
       .select("-_id -__v")
       .lean();
@@ -1298,50 +1176,62 @@ async function getSecurityAnomalies(req, res) {
       return res.json({ anomalies: [] });
     }
 
+    // Step 2: Enrich each anomaly with Prophet forecast context
+    // Pull forecasts for reference (expected values + confidence bands)
     const forecastQuery = { model_name: "prophet" };
     if (roomId) forecastQuery.room_id = roomId;
 
     const forecasts = await SecurityForecast.find(forecastQuery).lean();
 
+    // Map forecasts by room_id + hour for fast lookup
     const forecastMap = {};
     forecasts.forEach((f) => {
       forecastMap[`${f.room_id}_${f.hour}`] = f;
     });
 
+    // Step 3: Build enriched response
     const anomalies = mlAnomalies.map((anomaly) => {
-      const forecast      = forecastMap[`${anomaly.room_id}_${anomaly.hour}`];
+      const forecastKey = `${anomaly.room_id}_${anomaly.hour}`;
+      const forecast = forecastMap[forecastKey];
+
+      // Check if actual reading is outside Prophet confidence band
       const isOutsideBand = forecast
         ? anomaly.door_stable_ms > forecast.upper_bound_ms ||
           anomaly.door_stable_ms < forecast.lower_bound_ms
         : null;
 
       return {
-        room_id:      anomaly.room_id,
-        captured_at:  anomaly.captured_at,
-        hour:         anomaly.hour,
+        room_id: anomaly.room_id,
+        captured_at: anomaly.captured_at,
+        hour: anomaly.hour,
 
-        status:        anomaly.status,
-        reason:        anomaly.reason,
-        severity:      anomaly.severity,
-        anomaly_score: anomaly.anomaly_score,
+        // Isolation Forest output
+        status: anomaly.status,
+        reason: anomaly.reason,
+        severity: anomaly.severity,
+        anomaly_score: anomaly.anomaly_score,   // learned score, not hardcoded
 
-        door_stable_ms:  anomaly.door_stable_ms,
+        // Sensor readings
+        door_stable_ms: anomaly.door_stable_ms,
         door_stable_min: anomaly.door_stable_min,
-        motion_count:    anomaly.motion_count,
-        is_after_hours:  anomaly.is_after_hours,
-        is_empty:        anomaly.is_empty,
+        motion_count: anomaly.motion_count,
+        is_after_hours: anomaly.is_after_hours,
+        is_empty: anomaly.is_empty,
 
-        expected_door_stable_ms:  forecast?.expected_door_stable_ms  ?? null,
+        // Prophet context (if available)
+        expected_door_stable_ms: forecast?.expected_door_stable_ms ?? null,
         expected_door_stable_min: forecast?.expected_door_stable_min ?? null,
-        lower_bound_ms:           forecast?.lower_bound_ms           ?? null,
-        upper_bound_ms:           forecast?.upper_bound_ms           ?? null,
-        is_outside_prophet_band:  isOutsideBand,
+        lower_bound_ms: forecast?.lower_bound_ms ?? null,
+        upper_bound_ms: forecast?.upper_bound_ms ?? null,
+        is_outside_prophet_band: isOutsideBand,
 
+        // Makes ML origin explicit for the dashboard
         model_name: "isolation_forest"
       };
     });
 
     res.json({ anomalies });
+
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -1437,10 +1327,13 @@ module.exports = {
   getWardenSummary,
   getWardenRoomsStatus,
   getWardenNoiseIssues,
+  getWardenMlAlerts,
   getWardenFeatureImportance,
   getWardenAnomalies,
   getWardenPatterns,
   getWardenForecasts,
+  getWardenHistory,
+  getWardenDataRange,
   getSecuritySummary,
   getSecuritySuspiciousRooms,
   getSecurityDoorEvents,
