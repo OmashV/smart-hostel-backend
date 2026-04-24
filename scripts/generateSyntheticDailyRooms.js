@@ -4,9 +4,6 @@ require("dotenv").config();
 const DailyRoomSummary = require("../src/models/DailyRoomSummary");
 const { getFloorIdFromRoomId } = require("../src/utils/floor");
 
-const START_DATE = "2026-04-13";
-const END_DATE = "2026-04-25";
-
 const ROOM_PROFILES = {
   A102: {
     energyMultiplier: 0.82,
@@ -14,15 +11,15 @@ const ROOM_PROFILES = {
     currentMultiplier: 0.85,
     motionMultiplier: 0.95,
     soundMultiplier: 0.95,
-    doorMultiplier: 0.90
+    doorMultiplier: 0.9
   },
   A103: {
     energyMultiplier: 0.96,
     wasteMultiplier: 0.72,
     currentMultiplier: 0.95,
     motionMultiplier: 1.02,
-    soundMultiplier: 1.00,
-    doorMultiplier: 1.00
+    soundMultiplier: 1.0,
+    doorMultiplier: 1.0
   },
   A201: {
     energyMultiplier: 1.18,
@@ -33,20 +30,20 @@ const ROOM_PROFILES = {
     doorMultiplier: 1.05
   },
   A202: {
-    energyMultiplier: 1.30,
+    energyMultiplier: 1.3,
     wasteMultiplier: 1.22,
-    currentMultiplier: 1.20,
+    currentMultiplier: 1.2,
     motionMultiplier: 0.88,
     soundMultiplier: 0.95,
     doorMultiplier: 1.08
   },
   A203: {
     energyMultiplier: 0.92,
-    wasteMultiplier: 0.40,
-    currentMultiplier: 0.90,
+    wasteMultiplier: 0.4,
+    currentMultiplier: 0.9,
     motionMultiplier: 1.18,
     soundMultiplier: 1.08,
-    doorMultiplier: 1.00
+    doorMultiplier: 1.0
   }
 };
 
@@ -59,8 +56,12 @@ function addSmallVariation(base, seedFactor) {
 }
 
 function buildStatusCounts(wasteRatio) {
-  if (wasteRatio >= 30) return { critical_count: 1, warning_count: 0 };
-  if (wasteRatio >= 15) return { critical_count: 0, warning_count: 1 };
+  if (wasteRatio >= 30) {
+    return { critical_count: 1, warning_count: 0 };
+  }
+  if (wasteRatio >= 15) {
+    return { critical_count: 0, warning_count: 1 };
+  }
   return { critical_count: 0, warning_count: 0 };
 }
 
@@ -69,58 +70,67 @@ async function run() {
     console.log("Connecting to MongoDB...");
     await mongoose.connect(process.env.MONGO_URI);
     console.log("MongoDB connected.");
+    console.log("Connected DB:", mongoose.connection.name);
 
-    const baseRows = await DailyRoomSummary.find({
-      room_id: "A101",
-      date: { $gte: START_DATE, $lte: END_DATE }
-    })
+    let baseRows = await DailyRoomSummary.find({ room_id: "A101" })
       .sort({ date: 1 })
       .lean();
 
+    // Use only the most recent 14 A101 rows
+    baseRows = baseRows.slice(-14);
+
     if (!baseRows.length) {
-      console.log("No A101 daily summary rows found in requested date range.");
+      console.log("No A101 daily summary rows found.");
       process.exit(1);
     }
 
     console.log(`Using ${baseRows.length} A101 rows as real baseline.`);
+    console.log(
+      "Baseline date range:",
+      baseRows[0].date,
+      "to",
+      baseRows[baseRows.length - 1].date
+    );
 
     for (const [roomId, profile] of Object.entries(ROOM_PROFILES)) {
       const floorId = getFloorIdFromRoomId(roomId);
 
       for (let i = 0; i < baseRows.length; i++) {
         const row = baseRows[i];
+
         const dayFactor = 0.96 + (i % 5) * 0.025;
 
         const totalEnergy = addSmallVariation(
-          row.total_energy_kwh * profile.energyMultiplier,
+          Number(row.total_energy_kwh || 0) * profile.energyMultiplier,
           dayFactor
         );
 
         const wastedEnergy = addSmallVariation(
-          row.wasted_energy_kwh * profile.wasteMultiplier,
+          Number(row.wasted_energy_kwh || 0) * profile.wasteMultiplier,
           1.02 - (i % 3) * 0.03
         );
 
-        const wasteRatio = totalEnergy > 0 ? (wastedEnergy / totalEnergy) * 100 : 0;
+        const wasteRatio =
+          totalEnergy > 0 ? (wastedEnergy / totalEnergy) * 100 : 0;
 
         const avgCurrent = addSmallVariation(
-          (row.avg_current || 0) * profile.currentMultiplier,
+          Number(row.avg_current || 0) * profile.currentMultiplier,
           0.98 + (i % 4) * 0.02
         );
 
         const motionCount = Math.max(
           0,
-          Math.round((row.total_motion_count || 0) * profile.motionMultiplier)
+          Math.round(Number(row.total_motion_count || 0) * profile.motionMultiplier)
         );
 
         const avgSoundPeak = addSmallVariation(
-          (row.avg_sound_peak || 0) * profile.soundMultiplier,
+          Number(row.avg_sound_peak || 0) * profile.soundMultiplier,
           0.98 + (i % 3) * 0.01
         );
 
         const doorOpenCount = Math.max(
           0,
-          Math.round((row.door_open_count || 0) * profile.doorMultiplier)
+          Math.round(Number(row.door_open_count || 0) * profile.doorMultiplier)
         );
 
         const statusCounts = buildStatusCounts(wasteRatio);
@@ -153,10 +163,8 @@ async function run() {
       console.log(`Synthetic daily summary generated for ${roomId}`);
     }
 
-    console.log(
-      "Final daily_room_summary count:",
-      await DailyRoomSummary.countDocuments()
-    );
+    const finalCount = await DailyRoomSummary.countDocuments();
+    console.log("Final daily_room_summary count:", finalCount);
 
     await mongoose.disconnect();
     console.log("Synthetic daily room generation complete.");

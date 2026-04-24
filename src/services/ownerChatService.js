@@ -3,14 +3,20 @@ const {
   getFloorOverview,
   getRoomsOverview,
   getTopWasteRoomsToday,
-  getRoomDetail
+  getHighestWastedRoom,
+  getRoomDetail,
+  getWastePatternByWeekday,
+  getActiveAlerts
 } = require("./ownerChatTools");
 
 const TOOL_IMPL = {
   get_floor_overview: getFloorOverview,
   get_rooms_overview: getRoomsOverview,
   get_top_waste_rooms_today: getTopWasteRoomsToday,
-  get_room_detail: getRoomDetail
+  get_highest_wasted_room: getHighestWastedRoom,
+  get_room_detail: getRoomDetail,
+  get_waste_pattern_by_weekday: getWastePatternByWeekday,
+  get_active_alerts: getActiveAlerts
 };
 
 const TOOLS = [
@@ -80,6 +86,27 @@ const TOOLS = [
   {
     type: "function",
     function: {
+      name: "get_highest_wasted_room",
+      description:
+        "Get the single room with the highest wasted energy for the latest summary date, optionally within a selected floor.",
+      parameters: {
+        type: "object",
+        properties: {
+          floorId: {
+            type: "string",
+            description: 'Floor id like "A-Floor-1" or "all"'
+          },
+          date: {
+            type: "string",
+            description: "Optional summary date in YYYY-MM-DD format"
+          }
+        }
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
       name: "get_room_detail",
       description:
         "Get detailed history, alerts, anomalies, and forecast for one room.",
@@ -94,6 +121,49 @@ const TOOLS = [
         required: ["roomId"]
       }
     }
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_waste_pattern_by_weekday",
+      description:
+        "Get weekday-based waste pattern discovery for a specific room, including which weekdays usually have high waste, moderate waste, or efficient usage.",
+      parameters: {
+        type: "object",
+        properties: {
+          roomId: {
+            type: "string",
+            description: "Room id like A101 or A202"
+          }
+        },
+        required: ["roomId"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_active_alerts",
+      description:
+        "Get active owner alerts, optionally filtered by floor or room, for dashboard monitoring and drill-down.",
+      parameters: {
+        type: "object",
+        properties: {
+          floorId: {
+            type: "string",
+            description: 'Floor id like "A-Floor-1" or "all"'
+          },
+          roomId: {
+            type: "string",
+            description: 'Room id like "A101" or "all"'
+          },
+          limit: {
+            type: "number",
+            description: "Maximum number of alerts to return"
+          }
+        }
+      }
+    }
   }
 ];
 
@@ -101,21 +171,18 @@ function systemPrompt() {
   return `
 You are a Smart Hostel dashboard analytics assistant for the OWNER role.
 
-Your job:
-1. Answer natural language questions about the dashboard data.
-2. Help the user explore the dashboard.
-3. Explain trends, comparisons, anomalies, and forecasts.
-4. Support decision-oriented questions using the provided tool results.
+You answer questions using dashboard tools, not guesses.
 
 Rules:
 - Always use tools when data is needed.
-- Never claim that only one room exists unless the tool result actually shows only one room.
 - Never invent values.
-- If navigation would help, include action lines exactly like:
+- Use the current dashboard state when helpful.
+- For questions asking for analysis, comparison, trends, or explanation, answer directly without navigation actions.
+- Only include ACTION lines if the user explicitly asks to open, switch, go to, or show a floor or room.
+- Valid action lines are:
 ACTION: switch_floor=A-Floor-1
 ACTION: switch_room=A201
-- Ignore null or missing IDs in navigation suggestions.
-- Be clear and practical.
+- Ignore null or missing IDs.
 `;
 }
 
@@ -127,6 +194,11 @@ async function generateOwnerReply({ message, dashboardState }) {
     {
       role: "system",
       content: systemPrompt()
+    },
+    {
+      role: "system",
+      content:
+        'When a tool result directly answers the question, answer from the tool result exactly and do not say "no data" unless the tool result has null or empty data.'
     },
     {
       role: "user",
@@ -186,14 +258,36 @@ ${message}`
       parsedArgs.floorId = floorId;
     }
 
+    if (toolName === "get_highest_wasted_room" && !parsedArgs.floorId) {
+      parsedArgs.floorId = floorId;
+    }
+
     if (toolName === "get_room_detail" && !parsedArgs.roomId && roomId !== "all") {
       parsedArgs.roomId = roomId;
     }
+
+    if (toolName === "get_waste_pattern_by_weekday" && !parsedArgs.roomId && roomId !== "all") {
+      parsedArgs.roomId = roomId;
+    }
+
+    if (toolName === "get_active_alerts") {
+      if (!parsedArgs.floorId) {
+        parsedArgs.floorId = floorId;
+      }
+
+      if (!parsedArgs.roomId) {
+        parsedArgs.roomId = roomId;
+      }
+    }
+
+    console.log("Tool requested:", toolName);
+    console.log("Parsed args:", parsedArgs);
 
     const impl = TOOL_IMPL[toolName];
     if (!impl) continue;
 
     const result = await impl(parsedArgs);
+    console.log("Tool result:", JSON.stringify(result, null, 2));
     toolResults[toolName] = result;
 
     messages.push({

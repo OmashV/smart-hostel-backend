@@ -313,6 +313,126 @@ async function getOwnerRoomsOverview(req, res) {
   }
 }
 
+async function getOwnerOverviewSnapshot(req, res) {
+  try {
+    const { floorId = "all" } = req.query;
+
+    const matchStage = {};
+    if (floorId !== "all") {
+      matchStage.floor_id = floorId;
+    }
+
+    // Pick the latest date with the highest room coverage
+    const coverageRows = await DailyRoomSummary.aggregate([
+      { $match: matchStage },
+      {
+        $group: {
+          _id: "$date",
+          rooms_count: { $sum: 1 },
+          total_energy_kwh: { $sum: "$total_energy_kwh" },
+          wasted_energy_kwh: { $sum: "$wasted_energy_kwh" }
+        }
+      },
+      { $sort: { rooms_count: -1, _id: -1 } },
+      { $limit: 1 }
+    ]);
+
+    if (!coverageRows.length) {
+      return res.json({
+        summary_date: null,
+        kpis: {
+          total_energy_today_kwh: 0,
+          wasted_energy_today_kwh: 0,
+          waste_ratio_today_percent: 0,
+          current_waste_status: "No Data"
+        },
+        rooms: [],
+        alerts: []
+      });
+    }
+
+    const summaryDate = coverageRows[0]._id;
+
+    const query = { date: summaryDate };
+    if (floorId !== "all") {
+      query.floor_id = floorId;
+    }
+
+    const rows = await DailyRoomSummary.find(query)
+      .sort({ room_id: 1 })
+      .lean();
+
+    const totalEnergy = rows.reduce(
+      (sum, row) => sum + Number(row.total_energy_kwh || 0),
+      0
+    );
+
+    const wastedEnergy = rows.reduce(
+      (sum, row) => sum + Number(row.wasted_energy_kwh || 0),
+      0
+    );
+
+    const wasteRatio =
+      totalEnergy > 0
+        ? Number(((wastedEnergy / totalEnergy) * 100).toFixed(2))
+        : 0;
+
+    const highWasteRooms = rows.filter(
+      (row) => Number(row.waste_ratio_percent || 0) >= 30
+    ).length;
+
+    let alerts = await OwnerAlert.find({
+      is_deleted: false,
+      status: "active"
+    })
+      .sort({ createdAt: -1, updatedAt: -1 })
+      .lean();
+
+    if (floorId !== "all") {
+      const allowedRoomIds = rows.map((r) => r.room_id);
+      alerts = alerts.filter((a) => allowedRoomIds.includes(a.room_id));
+    }
+
+    return res.json({
+      summary_date: summaryDate,
+      kpis: {
+        total_energy_today_kwh: Number(totalEnergy.toFixed(4)),
+        wasted_energy_today_kwh: Number(wastedEnergy.toFixed(4)),
+        waste_ratio_today_percent: wasteRatio,
+        current_waste_status: `${highWasteRooms} High Waste Rooms`
+      },
+      rooms: rows.map((row) => {
+        const ratio = Number(row.waste_ratio_percent || 0);
+
+        return {
+          room_id: row.room_id,
+          floor_id: row.floor_id,
+          occupancy_stat: "Unknown",
+          noise_stat: "Compliant",
+          waste_stat:
+            ratio >= 30 ? "Critical" : ratio >= 15 ? "Warning" : "Normal",
+          total_energy_kwh: Number(row.total_energy_kwh || 0),
+          wasted_energy_kwh: Number(row.wasted_energy_kwh || 0),
+          waste_ratio_percent: ratio,
+          last_activity: row.updatedAt || row.createdAt || row.date,
+          alert_count:
+            row.critical_count > 0 ? 1 : row.warning_count > 0 ? 1 : 0
+        };
+      }),
+      alerts: alerts.map((a) => ({
+        _id: a._id,
+        room_id: a.room_id,
+        severity: a.severity,
+        title: a.title,
+        message: a.message,
+        captured_at: a.createdAt || a.updatedAt || a.date
+      }))
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
 async function getDailyEnergyHistory(req, res) {
   try {
     const { roomId } = req.params;
@@ -1256,6 +1376,7 @@ module.exports = {
   getOwnerPatterns,
   getOwnerForecasts,
   getOwnerRoomsOverview,
+  getOwnerOverviewSnapshot,
   getOwnerAlerts,
   deleteOwnerAlert,
   resolveOwnerAlert,
