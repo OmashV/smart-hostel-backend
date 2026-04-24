@@ -1,11 +1,15 @@
 const express = require("express");
 const {
   getLatestReading,
+  getAvailableFloors,
+  getAvailableRooms,
+  getFloorOverview,
   getOwnerKpis,
   getOwnerAnomalies,
   getOwnerPatterns,
   getOwnerForecasts,
   getOwnerRoomsOverview,
+  getOwnerOverviewSnapshot,
   getOwnerAlerts,
   getOwnerWeekdayPatterns,
   deleteOwnerAlert,
@@ -32,9 +36,13 @@ const {
 const router = express.Router();
 
 // shared
+router.get("/available-floors", getAvailableFloors);
+router.get("/available-rooms", getAvailableRooms);
+router.get("/floors/overview", getFloorOverview);
 router.get("/:roomId/latest-reading", getLatestReading);
 
 // owner
+router.get("/owner/overview-snapshot", getOwnerOverviewSnapshot);
 router.get("/owner/rooms-overview", getOwnerRoomsOverview);
 router.get("/owner/alerts", getOwnerAlerts);
 router.get("/owner/anomalies", getOwnerAnomalies);
