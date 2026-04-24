@@ -5,6 +5,8 @@ from sklearn.ensemble import IsolationForest
 from sklearn.cluster import KMeans
 from dotenv import load_dotenv
 from prophet import Prophet
+from sklearn.preprocessing import StandardScaler
+from pymongo import UpdateOne
 
 load_dotenv()
 
@@ -183,9 +185,12 @@ else:
 
 # ---------------------------
 # 3. K-MEANS BEHAVIOR CLUSTERING
-# Discovers room behavior profiles 
+# Discovers room behavior profiles
 # ---------------------------
 print("\n--- K-Means Behavior Clustering ---")
+
+from sklearn.preprocessing import StandardScaler
+from pymongo import UpdateOne
 
 cluster_features = df[[
     "door_stable_ms",
@@ -197,10 +202,17 @@ cluster_features = df[[
 pattern_docs = []
 
 if len(cluster_features) >= 3:
-    kmeans = KMeans(n_clusters=3, random_state=42, n_init=10)
-    df["cluster_label"] = kmeans.fit_predict(cluster_features)
+    print("Clustering rows:", len(cluster_features))
 
-    # Rank clusters by door duration (learned, not hardcoded)
+    # Scale features so door_stable_ms does not dominate
+    scaler = StandardScaler()
+    cluster_features_scaled = scaler.fit_transform(cluster_features)
+
+    # Reduce n_init to speed up clustering
+    kmeans = KMeans(n_clusters=3, random_state=42, n_init=3)
+    df["cluster_label"] = kmeans.fit_predict(cluster_features_scaled)
+
+    # Rank clusters by average door duration
     cluster_means = (
         df.groupby("cluster_label")["door_stable_ms"]
         .mean()
@@ -214,6 +226,8 @@ if len(cluster_features) >= 3:
         ordered[2]: "High Risk Pattern"
     }
 
+    operations = []
+
     for _, row in df.iterrows():
         doc = {
             "room_id": row["room_id"],
@@ -224,14 +238,21 @@ if len(cluster_features) >= 3:
             "door_stable_min": round(float(row["door_stable_min"]), 4),
             "motion_count": int(row["motion_count"]),
             "is_after_hours": bool(row["is_after_hours"]),
+            "is_empty": bool(row["is_empty"]),
             "model_name": "kmeans"
         }
         pattern_docs.append(doc)
-        db.security_patterns.update_one(
-            {"room_id": doc["room_id"], "captured_at": doc["captured_at"]},
-            {"$set": doc},
-            upsert=True
+
+        operations.append(
+            UpdateOne(
+                {"room_id": doc["room_id"], "captured_at": doc["captured_at"]},
+                {"$set": doc},
+                upsert=True
+            )
         )
+
+    if operations:
+        db.security_patterns.bulk_write(operations)
 
     print("Pattern docs saved:", len(pattern_docs))
 else:
