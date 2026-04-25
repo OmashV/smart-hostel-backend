@@ -4,6 +4,9 @@ const WardenMlAlertSchema = new mongoose.Schema(
   {
     room_id: { type: String, required: true, index: true },
     captured_at: { type: String, required: true, index: true },
+    evidence_at: { type: String, default: "" },
+    display_at: { type: Date },
+    generated_at: { type: Date },
     alert_type: { type: String, required: true },
     severity: { type: String, enum: ["Critical", "Warning", "Info"], default: "Warning" },
     confidence: { type: Number, default: 0 },

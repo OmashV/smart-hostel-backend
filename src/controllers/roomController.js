@@ -866,10 +866,17 @@ async function getWardenMlAlerts(req, res) {
     const { roomId = "All", limit = 20 } = req.query;
     const query = roomId && roomId !== "All" ? { room_id: roomId } : {};
     const items = await WardenMlAlert.find(query)
-      .sort({ captured_at: -1 })
+      .sort({ createdAt: -1, updatedAt: -1, captured_at: -1 })
       .limit(Number(limit) || 20)
       .lean();
-    res.json({ items });
+
+    const normalizedItems = items.map((item) => ({
+      ...item,
+      display_at: item.display_at || item.generated_at || item.updatedAt || item.createdAt || item.captured_at,
+      evidence_at: item.evidence_at || item.captured_at
+    }));
+
+    res.json({ items: normalizedItems });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }

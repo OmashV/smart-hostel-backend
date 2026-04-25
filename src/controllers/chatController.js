@@ -30,7 +30,9 @@ function buildFallbackReply(question, context) {
   }
 
   if (q.includes("inspection") || q.includes("cleaning")) {
-    return `${summary.inspectionRooms || 0} rooms currently need inspection from the latest sensor snapshot. Empty rooms can be prioritized for cleaning allocation.`;
+    const count = summary.inspectionRooms || 0;
+    const ids = summary.inspectionRoomIds?.length ? `: ${summary.inspectionRoomIds.join(", ")}` : ".";
+    return `${count} room${count === 1 ? "" : "s"} currently need inspection${ids}`;
   }
 
   if (q.includes("occupied") || q.includes("empty") || q.includes("room status")) {
