@@ -10,8 +10,11 @@ const WardenForecast = require("../models/WardenForecast");
 const WardenFeatureImportance = require("../models/WardenFeatureImportance");
 const WardenAnomaly = require("../models/WardenAnomaly");
 const WardenPattern = require("../models/WardenPattern");
+const WardenMlAlert = require("../models/WardenMlAlert");
+const WardenHourlySummary = require("../models/WardenHourlySummary");
 const SecurityForecast = require("../models/SecurityForecast");
 const SecurityAnomaly = require("../models/SecurityAnomaly");
+const { getFloorIdFromRoomId } = require("../utils/floor");
 const DemoSecurityReading = require("../models/DemoSecurityReading");
 const { getSecuritySource, REAL_ROOM } = require("../utils/securityReadingSource");
 
@@ -73,6 +76,142 @@ function buildDailyGroupStage() {
   };
 }
 
+function inferFloorId(roomId = "") {
+  const derived = getFloorIdFromRoomId(roomId);
+  if (derived && derived !== "Unknown") {
+    return derived.replace(/^[A-Z]-/, "");
+  }
+
+  const text = String(roomId || "").trim().toUpperCase();
+  const digitMatch = text.match(/(\d)/);
+  return digitMatch ? `Floor ${digitMatch[1]}` : "Other";
+}
+
+function buildInspectionReasons(room = {}) {
+  const reasons = [];
+  const waste = String(room.waste_stat || "").toLowerCase();
+  const noise = String(room.noise_stat || "").toLowerCase();
+
+  if (waste.includes("critical")) reasons.push("Critical waste");
+  else if (waste.includes("warning")) reasons.push("Waste warning");
+
+  if (noise.includes("violation")) reasons.push("Noise violation");
+  else if (noise.includes("complaint")) reasons.push("Noise complaint");
+  else if (noise.includes("warning")) reasons.push("Noise warning");
+
+  const faults = room.sensor_faults || {};
+  if (faults.pir) reasons.push("PIR sensor fault");
+  if (faults.door) reasons.push("Door sensor fault");
+  if (faults.sound) reasons.push("Sound sensor fault");
+  if (faults.current) reasons.push("Current sensor fault");
+
+  if (String(room.door_status || "").toLowerCase() === "open") {
+    reasons.push("Door left open");
+  }
+
+  return reasons;
+}
+
+function normalizeWardenRoom(latest = {}) {
+  const inspection_reasons = buildInspectionReasons(latest);
+  return {
+    room_id: latest.room_id,
+    floor_id: inferFloorId(latest.room_id),
+    occupancy_stat: latest.occupancy_stat || "Unknown",
+    noise_stat: latest.noise_stat || "Unknown",
+    waste_stat: latest.waste_stat || "Unknown",
+    door_status: latest.door_status || "Unknown",
+    current_amp: Number(latest.current_amp || 0),
+    sound_peak: Number(latest.sound_peak || 0),
+    motion_count: Number(latest.motion_count || 0),
+    door_stable_ms: Number(latest.door_stable_ms || 0),
+    sensor_faults: latest.sensor_faults || {},
+    needs_inspection: inspection_reasons.length > 0,
+    inspection_reasons,
+    captured_at: latest.captured_at || null
+  };
+}
+
+
+async function getLatestWardenRoomsFromRawOrSummary(roomId = "All") {
+  const dailyMatch = roomId && roomId !== "All" ? { room_id: roomId } : {};
+
+  // Owner-mirror data strategy:
+  // Owner room cards are based on the latest DailyRoomSummary snapshot with best
+  // room coverage, and the displayed activity time comes from updatedAt/createdAt.
+  // Warden uses the same integrated database foundation so A102/A103/etc update
+  // exactly like Owner after the summary builder runs.
+  const coverageRows = await DailyRoomSummary.aggregate([
+    { $match: dailyMatch },
+    {
+      $group: {
+        _id: "$date",
+        rooms_count: { $sum: 1 }
+      }
+    },
+    { $sort: { rooms_count: -1, _id: -1 } },
+    { $limit: 1 }
+  ]);
+
+  if (coverageRows.length) {
+    const latestDate = coverageRows[0]._id;
+    const query = { ...dailyMatch, date: latestDate };
+    const summaryRows = await DailyRoomSummary.find(query)
+      .sort({ room_id: 1 })
+      .lean();
+
+    if (summaryRows.length) {
+      return summaryRows.map((item) => {
+        const warningCount = Number(item.warning_count || 0);
+        const criticalCount = Number(item.critical_count || 0);
+        const doorOpenCount = Number(item.door_open_count || 0);
+        const motionCount = Number(item.total_motion_count || 0);
+        const activityTime = item.updatedAt || item.createdAt || (item.date ? new Date(`${item.date}T23:59:59+05:30`) : null);
+
+        return {
+          room_id: item.room_id,
+          floor_id: item.floor_id || inferFloorId(item.room_id),
+          occupancy_stat: motionCount > 0 ? "Occupied" : "Empty",
+          noise_stat: criticalCount > 0 ? "Violation" : warningCount > 0 ? "Warning" : "Compliant",
+          waste_stat: criticalCount > 0 ? "Critical" : warningCount > 0 ? "Warning" : "Normal",
+          door_status: doorOpenCount > 0 ? "Open" : "Closed",
+          current_amp: Number(item.avg_current || 0),
+          sound_peak: Number(item.avg_sound_peak || 0),
+          motion_count: motionCount,
+          door_stable_ms: 0,
+          sensor_faults: {},
+          captured_at: activityTime,
+          last_activity: activityTime,
+          summary_date: item.date,
+          summary_source: "daily_room_summary"
+        };
+      });
+    }
+  }
+
+  // Fallback only when no daily summary is available yet.
+  const rawMatch = roomId && roomId !== "All" ? { room_id: roomId } : {};
+  return SensorReading.aggregate([
+    { $match: rawMatch },
+    { $sort: { room_id: 1, captured_at: -1 } },
+    { $group: { _id: "$room_id", latest: { $first: "$$ROOT" } } },
+    { $replaceRoot: { newRoot: "$latest" } },
+    { $sort: { room_id: 1 } }
+  ]);
+}
+
+async function getLatestWardenEndDate(roomId = "All") {
+  const query = roomId && roomId !== "All" ? { room_id: roomId } : {};
+  const latestRaw = await SensorReading.findOne(query).sort({ captured_at: -1 }).lean();
+  const latestHourly = await WardenHourlySummary.findOne(query).sort({ date: -1, hour: -1 }).lean();
+  const latestDaily = await DailyRoomSummary.findOne(query).sort({ date: -1 }).lean();
+  const candidates = [];
+  if (latestRaw?.captured_at) candidates.push(getSriLankaDateString(new Date(latestRaw.captured_at)));
+  if (latestHourly?.date) candidates.push(latestHourly.date);
+  if (latestDaily?.date) candidates.push(latestDaily.date);
+  return candidates.sort().pop() || getSriLankaDateString(new Date());
+}
+
 async function getLatestReading(req, res) {
   try {
     const { roomId } = req.params;
@@ -93,7 +232,19 @@ async function getLatestReading(req, res) {
 
 async function getAvailableFloors(req, res) {
   try {
-    const floors = await DailyFloorSummary.distinct("floor_id");
+    let floors = [];
+
+    try {
+      floors = await DailyFloorSummary.distinct("floor_id");
+    } catch (error) {
+      floors = [];
+    }
+
+    if (!floors.length) {
+      const roomIds = await SensorReading.distinct("room_id");
+      floors = Array.from(new Set(roomIds.filter(Boolean).map(inferFloorId)));
+    }
+
     res.json({ floors: floors.filter(Boolean).sort() });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -104,12 +255,24 @@ async function getAvailableRooms(req, res) {
   try {
     const { floorId } = req.query;
 
-    const query = {};
-    if (floorId && floorId !== "all") {
-      query.floor_id = floorId;
+    let rooms = [];
+
+    try {
+      const query = {};
+      if (floorId && floorId !== "all") {
+        query.floor_id = floorId;
+      }
+      rooms = await DailyRoomSummary.distinct("room_id", query);
+    } catch (error) {
+      rooms = [];
     }
 
-    const rooms = await DailyRoomSummary.distinct("room_id", query);
+    if (!rooms.length) {
+      rooms = (await SensorReading.distinct("room_id")).filter(Boolean).sort();
+      if (floorId && floorId !== "all") {
+        rooms = rooms.filter((roomId) => inferFloorId(roomId) === floorId);
+      }
+    }
 
     res.json({
       rooms: rooms.filter(Boolean).sort()
@@ -692,46 +855,20 @@ async function getOwnerForecasts(req, res) {
 
 async function getWardenSummary(req, res) {
   try {
-    const latestPerRoom = await SensorReading.aggregate([
-      { $sort: { room_id: 1, captured_at: -1 } },
-      {
-        $group: {
-          _id: "$room_id",
-          latest: { $first: "$$ROOT" }
-        }
-      },
-      { $replaceRoot: { newRoot: "$latest" } }
-    ]);
-
-    const summary = {
-      occupied_rooms: 0,
-      empty_rooms: 0,
-      sleeping_rooms: 0,
-      noise_issue_rooms: 0,
-      rooms_needing_inspection: 0
-    };
-
+    const { roomId = "All" } = req.query;
+    const latestPerRoom = await getLatestWardenRoomsFromRawOrSummary(roomId);
+    const summary = { room_id: roomId, occupied_rooms: 0, empty_rooms: 0, sleeping_rooms: 0, noise_issue_rooms: 0, rooms_needing_inspection: 0, open_door_rooms: 0, cleaning_priority_rooms: 0 };
     for (const room of latestPerRoom) {
-      if (room.occupancy_stat === "Occupied") summary.occupied_rooms++;
-      else if (room.occupancy_stat === "Empty") summary.empty_rooms++;
-      else if (room.occupancy_stat === "Sleeping") summary.sleeping_rooms++;
-
-      if (room.noise_stat === "Warning" || room.noise_stat === "Violation") {
-        summary.noise_issue_rooms++;
-      }
-
-      if (
-        room.waste_stat === "Critical" ||
-        room.noise_stat === "Violation" ||
-        room.sensor_faults?.pir ||
-        room.sensor_faults?.door ||
-        room.sensor_faults?.sound ||
-        room.sensor_faults?.current
-      ) {
-        summary.rooms_needing_inspection++;
-      }
+      const normalized = normalizeWardenRoom(room);
+      if (normalized.occupancy_stat === "Occupied") summary.occupied_rooms++;
+      else if (normalized.occupancy_stat === "Empty") summary.empty_rooms++;
+      else if (normalized.occupancy_stat === "Sleeping") summary.sleeping_rooms++;
+      if (["Warning", "Violation", "Complaint"].includes(normalized.noise_stat)) summary.noise_issue_rooms++;
+      if (normalized.needs_inspection) summary.rooms_needing_inspection++;
+      if (normalized.door_status === "Open") summary.open_door_rooms++;
+      if (normalized.occupancy_stat === "Empty" || normalized.needs_inspection) summary.cleaning_priority_rooms++;
     }
-
+    summary.total_rooms = latestPerRoom.length;
     res.json(summary);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -740,30 +877,10 @@ async function getWardenSummary(req, res) {
 
 async function getWardenRoomsStatus(req, res) {
   try {
-    const rooms = await SensorReading.aggregate([
-      { $sort: { room_id: 1, captured_at: -1 } },
-      {
-        $group: {
-          _id: "$room_id",
-          latest: { $first: "$$ROOT" }
-        }
-      },
-      {
-        $project: {
-          _id: 0,
-          room_id: "$latest.room_id",
-          occupancy_stat: "$latest.occupancy_stat",
-          noise_stat: "$latest.noise_stat",
-          waste_stat: "$latest.waste_stat",
-          door_status: "$latest.door_status",
-          current_amp: "$latest.current_amp",
-          captured_at: "$latest.captured_at"
-        }
-      },
-      { $sort: { room_id: 1 } }
-    ]);
-
-    res.json({ rooms });
+    const { roomId = "All" } = req.query;
+    const latestPerRoom = await getLatestWardenRoomsFromRawOrSummary(roomId);
+    const rooms = latestPerRoom.map(normalizeWardenRoom);
+    res.json({ room_id: roomId, rooms });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -815,11 +932,87 @@ async function getWardenFeatureImportance(req, res) {
 
 async function getWardenAnomalies(req, res) {
   try {
-    const items = await WardenAnomaly.find()
-      .sort({ date: -1 })
+    const { roomId = "All" } = req.query;
+    const query = roomId && roomId !== "All" ? { room_id: roomId } : {};
+    const items = await WardenAnomaly.find(query).sort({ date: -1 }).lean();
+    res.json({ items });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
+
+async function getWardenDataRange(req, res) {
+  try {
+    const { roomId = "All" } = req.query;
+    const query = roomId && roomId !== "All" ? { room_id: roomId } : {};
+
+    const sensorCount = await SensorReading.countDocuments(query);
+    const hourlyCount = await WardenHourlySummary.countDocuments(query);
+    const dailyCount = await DailyRoomSummary.countDocuments(query);
+
+    const firstRaw = await SensorReading.findOne(query).sort({ captured_at: 1 }).lean();
+    const lastRaw = await SensorReading.findOne(query).sort({ captured_at: -1 }).lean();
+    const firstHourly = await WardenHourlySummary.findOne(query).sort({ date: 1, hour: 1 }).lean();
+    const lastHourly = await WardenHourlySummary.findOne(query).sort({ date: -1, hour: -1 }).lean();
+    const firstDaily = await DailyRoomSummary.findOne(query).sort({ date: 1 }).lean();
+    const lastDaily = await DailyRoomSummary.findOne(query).sort({ date: -1 }).lean();
+
+    const firstCandidates = [];
+    const lastCandidates = [];
+    if (firstRaw?.captured_at) firstCandidates.push(new Date(firstRaw.captured_at));
+    if (firstHourly?.date) firstCandidates.push(new Date(`${firstHourly.date}T${String(firstHourly.hour || 0).padStart(2, "0")}:00:00+05:30`));
+    if (firstDaily?.date) firstCandidates.push(new Date(`${firstDaily.date}T00:00:00+05:30`));
+    if (lastRaw?.captured_at) lastCandidates.push(new Date(lastRaw.captured_at));
+    if (lastHourly?.date) lastCandidates.push(new Date(`${lastHourly.date}T${String(lastHourly.hour || 23).padStart(2, "0")}:59:59+05:30`));
+    if (lastDaily?.date) lastCandidates.push(new Date(`${lastDaily.date}T23:59:59+05:30`));
+
+    if (!firstCandidates.length || !lastCandidates.length) {
+      return res.json({ room_id: roomId, total_records: 0, sensor_records: 0, hourly_summary_records: 0, daily_summary_records: 0, first_timestamp: null, last_timestamp: null, total_days_covered: 0, is_valid_5_to_7_days_or_more: false, data_sources: [] });
+    }
+
+    const firstDate = new Date(Math.min(...firstCandidates.map((d) => d.getTime())));
+    const lastDate = new Date(Math.max(...lastCandidates.map((d) => d.getTime())));
+    const totalDaysCovered = Math.max(1, Math.floor((lastDate - firstDate) / (1000 * 60 * 60 * 24)) + 1);
+
+    res.json({
+      room_id: roomId,
+      total_records: sensorCount + hourlyCount + dailyCount,
+      sensor_records: sensorCount,
+      hourly_summary_records: hourlyCount,
+      daily_summary_records: dailyCount,
+      first_timestamp: firstDate,
+      last_timestamp: lastDate,
+      total_days_covered: totalDaysCovered,
+      is_valid_5_to_7_days_or_more: totalDaysCovered >= 5,
+      data_sources: [
+        sensorCount ? "sensorreadings" : null,
+        hourlyCount ? "warden_hourly_summary" : null,
+        dailyCount ? "daily_room_summary" : null
+      ].filter(Boolean)
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
+
+async function getWardenMlAlerts(req, res) {
+  try {
+    const { roomId = "All", limit = 20 } = req.query;
+    const query = roomId && roomId !== "All" ? { room_id: roomId } : {};
+    const items = await WardenMlAlert.find(query)
+      .sort({ createdAt: -1, updatedAt: -1, captured_at: -1 })
+      .limit(Number(limit) || 20)
       .lean();
 
-    res.json({ items });
+    const normalizedItems = items.map((item) => ({
+      ...item,
+      display_at: item.display_at || item.generated_at || item.updatedAt || item.createdAt || item.captured_at,
+      evidence_at: item.evidence_at || item.captured_at
+    }));
+
+    res.json({ items: normalizedItems });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -827,9 +1020,72 @@ async function getWardenAnomalies(req, res) {
 
 async function getWardenPatterns(req, res) {
   try {
-    const items = await WardenPattern.find()
-      .sort({ date: -1 })
-      .lean();
+    const { roomId = "All" } = req.query;
+    const orderedDays = [
+      "Monday",
+      "Tuesday",
+      "Wednesday",
+      "Thursday",
+      "Friday",
+      "Saturday",
+      "Sunday"
+    ];
+
+    const query = roomId && roomId !== "All" ? { room_id: roomId } : { room_id: "All" };
+    let docs = await WardenPattern.find(query).lean();
+
+    if ((!docs || !docs.length) && (!roomId || roomId === "All")) {
+      docs = await WardenPattern.aggregate([
+        { $match: { room_id: { $ne: "All" } } },
+        {
+          $group: {
+            _id: "$day",
+            avg_occupancy: { $avg: "$avg_occupancy" },
+            avg_noise_level: { $avg: "$avg_noise_level" },
+            avg_warnings: { $avg: "$avg_warnings" },
+            avg_critical_ratio: { $avg: "$avg_critical_ratio" },
+            record_count: { $sum: "$record_count" },
+            usual_pattern: { $first: "$usual_pattern" },
+            cluster_id: { $first: "$cluster_id" },
+            model_name: { $first: "$model_name" }
+          }
+        },
+        {
+          $project: {
+            _id: 0,
+            room_id: "All",
+            day: "$_id",
+            day_type: { $cond: [{ $in: ["$_id", ["Saturday", "Sunday"]] }, "Weekend", "Weekday"] },
+            avg_occupancy: { $round: ["$avg_occupancy", 2] },
+            avg_noise_level: { $round: ["$avg_noise_level", 2] },
+            avg_warnings: { $round: ["$avg_warnings", 2] },
+            avg_critical_ratio: { $round: ["$avg_critical_ratio", 2] },
+            record_count: 1,
+            usual_pattern: 1,
+            cluster_id: 1,
+            model_name: 1
+          }
+        }
+      ]);
+    }
+
+    const byDay = new Map((docs || []).map((item) => [item.day, item]));
+    const items = orderedDays.map((day) => {
+      const found = byDay.get(day);
+      return found || {
+        room_id: roomId || "All",
+        day,
+        day_type: ["Saturday", "Sunday"].includes(day) ? "Weekend" : "Weekday",
+        cluster_id: -1,
+        usual_pattern: "No Data",
+        avg_occupancy: 0,
+        avg_noise_level: 0,
+        avg_warnings: 0,
+        avg_critical_ratio: 0,
+        record_count: 0,
+        model_name: "KMeans"
+      };
+    });
 
     res.json({ items });
   } catch (error) {
@@ -839,15 +1095,165 @@ async function getWardenPatterns(req, res) {
 
 async function getWardenForecasts(req, res) {
   try {
-    const items = await WardenForecast.find()
-      .sort({ date: 1 })
-      .lean();
-
+    const { roomId = "All" } = req.query;
+    const query = roomId && roomId !== "All" ? { room_id: roomId } : {};
+    const items = await WardenForecast.find(query).sort({ date: 1 }).lean();
     res.json({ items });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 }
+
+async function getWardenInspectionQueue(req, res) {
+  try {
+    const { roomId = "All" } = req.query;
+    const latestPerRoom = await getLatestWardenRoomsFromRawOrSummary(roomId);
+
+    const rooms = latestPerRoom
+      .map(normalizeWardenRoom)
+      .filter((room) => room.needs_inspection)
+      .sort((a, b) => {
+        const aScore = (a.noise_stat === "Violation" ? 3 : a.noise_stat === "Warning" ? 2 : 0) +
+          (a.waste_stat === "Critical" ? 2 : a.waste_stat === "Warning" ? 1 : 0) +
+          (a.door_status === "Open" ? 1 : 0);
+        const bScore = (b.noise_stat === "Violation" ? 3 : b.noise_stat === "Warning" ? 2 : 0) +
+          (b.waste_stat === "Critical" ? 2 : b.waste_stat === "Warning" ? 1 : 0) +
+          (b.door_status === "Open" ? 1 : 0);
+        return bScore - aScore || String(a.room_id).localeCompare(String(b.room_id));
+      });
+
+    res.json({ room_id: roomId, rooms });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
+
+async function getWardenNoiseTrend(req, res) {
+  try {
+    const days = Math.max(Number(req.query.days || 7), 1);
+    const roomId = req.query.roomId || "All";
+
+    const endDate = await getLatestWardenEndDate(roomId);
+    const startDateObj = new Date(`${endDate}T00:00:00+05:30`);
+    startDateObj.setDate(startDateObj.getDate() - (days - 1));
+    const startDate = getSriLankaDateString(startDateObj);
+    const roomFilter = roomId && roomId !== "All" ? { room_id: roomId } : {};
+
+    const hourlyRoomIds = await WardenHourlySummary.distinct("room_id", {
+      ...roomFilter,
+      date: { $gte: startDate, $lte: endDate }
+    });
+
+    const hourlyTrend = await WardenHourlySummary.aggregate([
+      { $match: { ...roomFilter, date: { $gte: startDate, $lte: endDate } } },
+      { $group: { _id: "$date", warning_count: { $sum: { $ifNull: ["$warning_count", 0] } }, violation_count: { $sum: { $ifNull: ["$violation_count", 0] } } } },
+      { $project: { _id: 0, date: "$_id", warning_count: 1, violation_count: 1 } }
+    ]);
+
+    const dailyMatch = { ...roomFilter, date: { $gte: startDate, $lte: endDate } };
+    if ((!roomId || roomId === "All") && hourlyRoomIds.length) {
+      dailyMatch.room_id = { $nin: hourlyRoomIds };
+    }
+
+    const dailyTrend = await DailyRoomSummary.aggregate([
+      { $match: dailyMatch },
+      { $group: { _id: "$date", warning_count: { $sum: { $ifNull: ["$warning_count", 0] } }, violation_count: { $sum: { $ifNull: ["$critical_count", 0] } } } },
+      { $project: { _id: 0, date: "$_id", warning_count: 1, violation_count: 1 } }
+    ]);
+
+    const byDate = new Map();
+    for (const row of [...hourlyTrend, ...dailyTrend]) {
+      const current = byDate.get(row.date) || { date: row.date, warning_count: 0, violation_count: 0 };
+      current.warning_count += Number(row.warning_count || 0);
+      current.violation_count += Number(row.violation_count || 0);
+      byDate.set(row.date, current);
+    }
+
+    const trend = Array.from(byDate.values()).sort((a, b) => String(a.date).localeCompare(String(b.date)));
+    res.json({ days, trend, source_priority: ["warden_hourly_summary", "daily_room_summary"] });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
+
+async function getWardenHistory(req, res) {
+  try {
+    const days = Math.max(parseInt(req.query.days || "7", 10), 1);
+    const roomId = req.query.roomId || "All";
+    const endDate = await getLatestWardenEndDate(roomId);
+    const startDateObj = new Date(`${endDate}T00:00:00+05:30`);
+    startDateObj.setDate(startDateObj.getDate() - (days - 1));
+    const startDate = getSriLankaDateString(startDateObj);
+    const roomFilter = roomId && roomId !== "All" ? { room_id: roomId } : {};
+
+    const hourlyRoomIds = await WardenHourlySummary.distinct("room_id", {
+      ...roomFilter,
+      date: { $gte: startDate, $lte: endDate }
+    });
+
+    const hourlyRows = await WardenHourlySummary.aggregate([
+      { $match: { ...roomFilter, date: { $gte: startDate, $lte: endDate } } },
+      { $group: { _id: { date: "$date", room_id: "$room_id" }, occupied_count: { $sum: { $ifNull: ["$occupied_count", 0] } }, empty_count: { $sum: { $ifNull: ["$empty_count", 0] } }, sleeping_count: { $sum: { $ifNull: ["$sleeping_count", 0] } }, warning_count: { $sum: { $ifNull: ["$warning_count", 0] } }, violation_count: { $sum: { $ifNull: ["$violation_count", 0] } }, door_open_count: { $sum: { $ifNull: ["$door_open_count", 0] } }, inspection_count: { $sum: { $ifNull: ["$inspection_count", 0] } }, avg_sound_peak: { $avg: { $ifNull: ["$avg_sound_peak", 0] } }, avg_current: { $avg: { $ifNull: ["$avg_current", 0] } } } },
+      { $project: { _id: 0, date: "$_id.date", room_id: "$_id.room_id", occupied_count: 1, empty_count: 1, sleeping_count: 1, warning_count: 1, violation_count: 1, door_open_count: 1, inspection_count: 1, avg_sound_peak: { $round: ["$avg_sound_peak", 2] }, avg_current: { $round: ["$avg_current", 4] }, source: "warden_hourly_summary" } }
+    ]);
+
+    const dailyMatch = { ...roomFilter, date: { $gte: startDate, $lte: endDate } };
+    if ((!roomId || roomId === "All") && hourlyRoomIds.length) {
+      dailyMatch.room_id = { $nin: hourlyRoomIds };
+    }
+
+    const dailyRows = await DailyRoomSummary.aggregate([
+      { $match: dailyMatch },
+      { $project: { room_id: 1, date: 1, occupied_count: { $ifNull: ["$total_motion_count", 0] }, empty_count: { $literal: 0 }, sleeping_count: { $literal: 0 }, warning_count: { $ifNull: ["$warning_count", 0] }, violation_count: { $ifNull: ["$critical_count", 0] }, door_open_count: { $ifNull: ["$door_open_count", 0] }, inspection_count: { $add: [{ $ifNull: ["$warning_count", 0] }, { $ifNull: ["$critical_count", 0] }] }, avg_sound_peak: { $ifNull: ["$avg_sound_peak", 0] }, avg_current: { $ifNull: ["$avg_current", 0] }, source: { $literal: "daily_room_summary" } } }
+    ]);
+
+    let combinedRoomRows = [...hourlyRows, ...dailyRows];
+
+    if (!combinedRoomRows.length) {
+      combinedRoomRows = await SensorReading.aggregate([
+        { $match: { ...roomFilter, captured_at: { $gte: new Date(`${startDate}T00:00:00+05:30`), $lte: new Date(`${endDate}T23:59:59+05:30`) } } },
+        { $group: { _id: { date: { $dateToString: { format: "%Y-%m-%d", date: "$captured_at", timezone: TIMEZONE } }, room_id: "$room_id" }, occupied_count: { $sum: { $cond: [{ $eq: ["$occupancy_stat", "Occupied"] }, 1, 0] } }, empty_count: { $sum: { $cond: [{ $eq: ["$occupancy_stat", "Empty"] }, 1, 0] } }, sleeping_count: { $sum: { $cond: [{ $eq: ["$occupancy_stat", "Sleeping"] }, 1, 0] } }, warning_count: { $sum: { $cond: [{ $eq: ["$noise_stat", "Warning"] }, 1, 0] } }, violation_count: { $sum: { $cond: [{ $eq: ["$noise_stat", "Violation"] }, 1, 0] } }, door_open_count: { $sum: { $cond: [{ $eq: ["$door_status", "Open"] }, 1, 0] } }, avg_sound_peak: { $avg: "$sound_peak" }, avg_current: { $avg: "$current_amp" }, inspection_count: { $sum: { $cond: ["$needs_inspection", 1, 0] } } } },
+        { $project: { _id: 0, date: "$_id.date", room_id: "$_id.room_id", occupied_count: 1, empty_count: 1, sleeping_count: 1, warning_count: 1, violation_count: 1, door_open_count: 1, inspection_count: 1, avg_sound_peak: { $round: ["$avg_sound_peak", 2] }, avg_current: { $round: ["$avg_current", 4] }, source: "sensorreadings" } }
+      ]);
+    }
+
+    const byDate = new Map();
+    for (const row of combinedRoomRows) {
+      const key = row.date;
+      const current = byDate.get(key) || { date: key, occupied_count: 0, empty_count: 0, sleeping_count: 0, warning_count: 0, violation_count: 0, door_open_count: 0, inspection_count: 0, avg_sound_peak_sum: 0, avg_current_sum: 0, room_count: 0, sources: new Set() };
+      current.occupied_count += Number(row.occupied_count || 0);
+      current.empty_count += Number(row.empty_count || 0);
+      current.sleeping_count += Number(row.sleeping_count || 0);
+      current.warning_count += Number(row.warning_count || 0);
+      current.violation_count += Number(row.violation_count || 0);
+      current.door_open_count += Number(row.door_open_count || 0);
+      current.inspection_count += Number(row.inspection_count || 0);
+      current.avg_sound_peak_sum += Number(row.avg_sound_peak || 0);
+      current.avg_current_sum += Number(row.avg_current || 0);
+      current.room_count += 1;
+      if (row.source) current.sources.add(row.source);
+      byDate.set(key, current);
+    }
+
+    const results = Array.from(byDate.values())
+      .map((row) => ({
+        date: row.date, occupied_count: row.occupied_count, empty_count: row.empty_count, sleeping_count: row.sleeping_count,
+        warning_count: row.warning_count, violation_count: row.violation_count, door_open_count: row.door_open_count, inspection_count: row.inspection_count,
+        avg_sound_peak: row.room_count ? Number((row.avg_sound_peak_sum / row.room_count).toFixed(2)) : 0,
+        avg_current: row.room_count ? Number((row.avg_current_sum / row.room_count).toFixed(4)) : 0,
+        room_count: row.room_count, source: Array.from(row.sources).join(" + ")
+      }))
+      .sort((a, b) => String(a.date).localeCompare(String(b.date)));
+
+    res.json({ items: results, room_level_items: combinedRoomRows, source_priority: ["warden_hourly_summary", "daily_room_summary", "sensorreadings"] });
+  } catch (error) {
+    console.error("getWardenHistory error:", error);
+    res.status(500).json({ message: "Failed to load warden history" });
+  }
+}
+
 
 async function getOwnerFeatureImportance(req, res) {
   try {
@@ -1437,10 +1843,15 @@ module.exports = {
   getWardenSummary,
   getWardenRoomsStatus,
   getWardenNoiseIssues,
+  getWardenInspectionQueue,
+  getWardenNoiseTrend,
+  getWardenHistory,
   getWardenFeatureImportance,
   getWardenAnomalies,
   getWardenPatterns,
   getWardenForecasts,
+  getWardenMlAlerts,
+  getWardenDataRange,
   getSecuritySummary,
   getSecuritySuspiciousRooms,
   getSecurityDoorEvents,
