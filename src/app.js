@@ -1,6 +1,7 @@
 const express = require("express");
 const cors = require("cors");
 const roomRoutes = require("./routes/roomRoutes");
+const chatRoutes = require("./routes/chatRoutes");
 const studentRoutes = require("./routes/studentRoutes");
 
 const app = express();
@@ -14,5 +15,6 @@ app.get("/", (req, res) => {
 
 app.use("/api/rooms/student", studentRoutes);
 app.use("/api/rooms", roomRoutes);
+app.use("/api/chat", chatRoutes);
 
 module.exports = app;
