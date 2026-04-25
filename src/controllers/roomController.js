@@ -118,44 +118,70 @@ function normalizeWardenRoom(latest = {}) {
 
 
 async function getLatestWardenRoomsFromRawOrSummary(roomId = "All") {
+  const dailyMatch = roomId && roomId !== "All" ? { room_id: roomId } : {};
+
+  // Owner-mirror data strategy:
+  // Owner room cards are based on the latest DailyRoomSummary snapshot with best
+  // room coverage, and the displayed activity time comes from updatedAt/createdAt.
+  // Warden uses the same integrated database foundation so A102/A103/etc update
+  // exactly like Owner after the summary builder runs.
+  const coverageRows = await DailyRoomSummary.aggregate([
+    { $match: dailyMatch },
+    {
+      $group: {
+        _id: "$date",
+        rooms_count: { $sum: 1 }
+      }
+    },
+    { $sort: { rooms_count: -1, _id: -1 } },
+    { $limit: 1 }
+  ]);
+
+  if (coverageRows.length) {
+    const latestDate = coverageRows[0]._id;
+    const query = { ...dailyMatch, date: latestDate };
+    const summaryRows = await DailyRoomSummary.find(query)
+      .sort({ room_id: 1 })
+      .lean();
+
+    if (summaryRows.length) {
+      return summaryRows.map((item) => {
+        const warningCount = Number(item.warning_count || 0);
+        const criticalCount = Number(item.critical_count || 0);
+        const doorOpenCount = Number(item.door_open_count || 0);
+        const motionCount = Number(item.total_motion_count || 0);
+        const activityTime = item.updatedAt || item.createdAt || (item.date ? new Date(`${item.date}T23:59:59+05:30`) : null);
+
+        return {
+          room_id: item.room_id,
+          floor_id: item.floor_id || inferFloorId(item.room_id),
+          occupancy_stat: motionCount > 0 ? "Occupied" : "Empty",
+          noise_stat: criticalCount > 0 ? "Violation" : warningCount > 0 ? "Warning" : "Compliant",
+          waste_stat: criticalCount > 0 ? "Critical" : warningCount > 0 ? "Warning" : "Normal",
+          door_status: doorOpenCount > 0 ? "Open" : "Closed",
+          current_amp: Number(item.avg_current || 0),
+          sound_peak: Number(item.avg_sound_peak || 0),
+          motion_count: motionCount,
+          door_stable_ms: 0,
+          sensor_faults: {},
+          captured_at: activityTime,
+          last_activity: activityTime,
+          summary_date: item.date,
+          summary_source: "daily_room_summary"
+        };
+      });
+    }
+  }
+
+  // Fallback only when no daily summary is available yet.
   const rawMatch = roomId && roomId !== "All" ? { room_id: roomId } : {};
-  let latestPerRoom = await SensorReading.aggregate([
+  return SensorReading.aggregate([
     { $match: rawMatch },
     { $sort: { room_id: 1, captured_at: -1 } },
     { $group: { _id: "$room_id", latest: { $first: "$$ROOT" } } },
     { $replaceRoot: { newRoot: "$latest" } },
     { $sort: { room_id: 1 } }
   ]);
-
-  const rawRoomIds = new Set(latestPerRoom.map((item) => item.room_id).filter(Boolean));
-  const dailyQuery = roomId && roomId !== "All" ? { room_id: roomId } : {};
-  const latestDaily = await DailyRoomSummary.aggregate([
-    { $match: dailyQuery },
-    { $sort: { room_id: 1, date: -1 } },
-    { $group: { _id: "$room_id", latest: { $first: "$$ROOT" } } },
-    { $replaceRoot: { newRoot: "$latest" } },
-    { $sort: { room_id: 1 } }
-  ]);
-
-  const summaryRooms = latestDaily
-    .filter((item) => item.room_id && !rawRoomIds.has(item.room_id))
-    .map((item) => ({
-      room_id: item.room_id,
-      floor_id: item.floor_id || inferFloorId(item.room_id),
-      occupancy_stat: Number(item.total_motion_count || 0) > 0 ? "Occupied" : "Empty",
-      noise_stat: Number(item.warning_count || 0) > 0 || Number(item.critical_count || 0) > 0 ? "Warning" : "Normal",
-      waste_stat: Number(item.critical_count || 0) > 0 ? "Critical" : Number(item.warning_count || 0) > 0 ? "Warning" : "Normal",
-      door_status: Number(item.door_open_count || 0) > 0 ? "Open" : "Closed",
-      current_amp: Number(item.avg_current || 0),
-      sound_peak: Number(item.avg_sound_peak || 0),
-      motion_count: Number(item.total_motion_count || 0),
-      door_stable_ms: 0,
-      sensor_faults: {},
-      captured_at: item.date ? new Date(`${item.date}T23:59:59+05:30`) : null,
-      summary_source: "daily_room_summary"
-    }));
-
-  return [...latestPerRoom, ...summaryRooms].sort((a, b) => String(a.room_id).localeCompare(String(b.room_id)));
 }
 
 async function getLatestWardenEndDate(roomId = "All") {
