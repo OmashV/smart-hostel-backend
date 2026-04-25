@@ -1,7 +1,7 @@
 const express = require("express");
-const router = express.Router();
-const { chatHandler } = require("../controllers/chatController");
+const { askDashboardAssistant } = require("../controllers/chatController");
 
-router.post("/", chatHandler);
+const router = express.Router();
+router.post("/query", askDashboardAssistant);
 
 module.exports = router;

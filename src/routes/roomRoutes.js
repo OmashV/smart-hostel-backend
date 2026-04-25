@@ -9,7 +9,6 @@ const {
   getOwnerPatterns,
   getOwnerForecasts,
   getOwnerRoomsOverview,
-  getOwnerOverviewSnapshot,
   getOwnerAlerts,
   getOwnerWeekdayPatterns,
   deleteOwnerAlert,
@@ -19,12 +18,14 @@ const {
   getWardenSummary,
   getWardenRoomsStatus,
   getWardenNoiseIssues,
-  getWardenMlAlerts,
+  getWardenInspectionQueue,
+  getWardenNoiseTrend,
   getWardenFeatureImportance,
   getWardenAnomalies,
   getWardenPatterns,
   getWardenForecasts,
   getWardenHistory,
+  getWardenMlAlerts,
   getWardenDataRange,
   getSecuritySummary,
   getSecuritySuspiciousRooms,
@@ -45,7 +46,6 @@ router.get("/floors/overview", getFloorOverview);
 router.get("/:roomId/latest-reading", getLatestReading);
 
 // owner
-router.get("/owner/overview-snapshot", getOwnerOverviewSnapshot);
 router.get("/owner/rooms-overview", getOwnerRoomsOverview);
 router.get("/owner/alerts", getOwnerAlerts);
 router.get("/owner/anomalies", getOwnerAnomalies);
@@ -58,17 +58,18 @@ router.get("/:roomId/energy/forecast", getEnergyForecast);
 router.get("/owner/patterns", getOwnerPatterns);
 router.get("/owner/forecasts", getOwnerForecasts);
 
-
 // warden
 router.get("/warden/summary", getWardenSummary);
 router.get("/warden/rooms-status", getWardenRoomsStatus);
 router.get("/warden/noise-issues", getWardenNoiseIssues);
-router.get("/warden/ml-alerts", getWardenMlAlerts);
+router.get("/warden/inspection-queue", getWardenInspectionQueue);
+router.get("/warden/noise-trend", getWardenNoiseTrend);
 router.get("/warden/feature-importance", getWardenFeatureImportance);
 router.get("/warden/anomalies", getWardenAnomalies);
 router.get("/warden/patterns", getWardenPatterns);
 router.get("/warden/forecasts", getWardenForecasts);
 router.get("/warden/history", getWardenHistory);
+router.get("/warden/ml-alerts", getWardenMlAlerts);
 router.get("/warden/data-range", getWardenDataRange);
 
 // security
