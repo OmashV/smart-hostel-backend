@@ -1,8 +1,6 @@
-"""
-Owner-style Warden analytics pipeline.
-Data source priority is the same integrated MongoDB foundation used by the dashboards:
-1) warden_hourly_summary, 2) daily_room_summary, 3) sensorreadings.
-Outputs are ML/statistical insight collections only: forecasts, ML alerts, anomalies, weekly patterns.
+"""Real-data-only Warden analytics pipeline.
+Inputs: MongoDB sensorreadings and warden_hourly_summary built from sensorreadings.
+Outputs: warden_forecasts, warden_ml_alerts, warden_anomalies, warden_patterns.
 """
 import os
 from datetime import datetime, timedelta
@@ -68,30 +66,6 @@ def _hourly_dataframe(hourly_docs):
     return df
 
 
-def _daily_dataframe(daily_docs):
-    if not daily_docs:
-        return pd.DataFrame()
-    df = pd.DataFrame(daily_docs)
-    df = ensure_columns(df, {
-        "room_id": "Unknown", "date": None,
-        "total_motion_count": 0, "avg_sound_peak": 0, "avg_current": 0,
-        "door_open_count": 0, "warning_count": 0, "critical_count": 0,
-    })
-    df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    df = df.dropna(subset=["date", "room_id"])
-    df["hour"] = 12
-    df["datetime"] = df["date"] + pd.to_timedelta(df["hour"], unit="h")
-    df["occupied_count"] = pd.to_numeric(df["total_motion_count"], errors="coerce").fillna(0)
-    df["empty_count"] = 0
-    df["sleeping_count"] = 0
-    df["violation_count"] = pd.to_numeric(df["critical_count"], errors="coerce").fillna(0)
-    df["warning_count"] = pd.to_numeric(df["warning_count"], errors="coerce").fillna(0)
-    df["complaint_count"] = df["warning_count"]
-    df["inspection_count"] = df["warning_count"].fillna(0) + df["violation_count"].fillna(0)
-    df["source_type"] = "daily_room_summary"
-    return df
-
-
 def _sensor_dataframe(sensor_docs):
     if not sensor_docs:
         return pd.DataFrame()
@@ -124,18 +98,13 @@ def _sensor_dataframe(sensor_docs):
 
 
 def load_source_dataframe():
-    """Load the same integrated data foundation Owner uses.
+    """Load only real Warden data.
 
-    Important: warden_hourly_summary may only exist for raw IoT rooms such as A101.
-    daily_room_summary may contain Owner-style/synthetic rooms such as A102/A103/A201.
-    Therefore this function MUST NOT return immediately when hourly rows exist.
-    It merges the strongest available source per room:
-      - hourly summary for rooms that have it,
-      - daily room summary for rooms missing from hourly,
-      - raw sensor aggregation for any remaining rooms.
+    The pipeline uses only sources derived directly from sensorreadings for strict real-data mode.
+    warden_hourly_summary is used first because it is generated directly from
+    sensorreadings; raw sensorreadings fills any remaining rooms.
     """
     hourly_df = _hourly_dataframe(list(db.warden_hourly_summary.find({}, {"_id": 0})))
-    daily_df = _daily_dataframe(list(db.daily_room_summary.find({}, {"_id": 0})))
     sensor_df = _sensor_dataframe(list(db.sensorreadings.find({}, {"_id": 0})))
 
     frames = []
@@ -144,12 +113,6 @@ def load_source_dataframe():
     if not hourly_df.empty:
         frames.append(hourly_df)
         used_rooms.update(hourly_df["room_id"].astype(str).unique())
-
-    if not daily_df.empty:
-        missing_daily = daily_df[~daily_df["room_id"].astype(str).isin(used_rooms)].copy()
-        if not missing_daily.empty:
-            frames.append(missing_daily)
-            used_rooms.update(missing_daily["room_id"].astype(str).unique())
 
     if not sensor_df.empty:
         missing_sensor = sensor_df[~sensor_df["room_id"].astype(str).isin(used_rooms)].copy()
@@ -160,7 +123,7 @@ def load_source_dataframe():
         return pd.DataFrame()
 
     merged = pd.concat(frames, ignore_index=True, sort=False)
-    merged["source_type"] = merged["source_type"].fillna("integrated_mongodb")
+    merged["source_type"] = merged["source_type"].fillna("real_mongodb")
     return merged
 
 def add_time_features(df):
@@ -300,14 +263,14 @@ def train_weekly_patterns(df):
 def main():
     df = load_source_dataframe()
     if df.empty:
-        print("No data found in warden_hourly_summary, daily_room_summary, or sensorreadings")
+        print("No data found in warden_hourly_summary or sensorreadings")
         return
     df = add_time_features(df).sort_values(["room_id", "datetime"])
     print("Rows:", len(df), "Rooms:", df["room_id"].nunique(), "Sources:", sorted(df["source_type"].astype(str).unique()))
     train_forecasts(df)
     train_anomalies_and_alerts(df)
     train_weekly_patterns(df)
-    for name in ["sensorreadings", "daily_room_summary", "warden_hourly_summary", "warden_forecasts", "warden_anomalies", "warden_patterns", "warden_ml_alerts"]:
+    for name in ["sensorreadings", "warden_hourly_summary", "warden_forecasts", "warden_anomalies", "warden_patterns", "warden_ml_alerts"]:
         print(name + ":", db[name].count_documents({}))
     print("Warden ML analysis complete.")
 
