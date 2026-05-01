@@ -113,15 +113,37 @@ async function deterministicWardenAnswer(message = "", dashboardState = {}) {
     text.includes("noise") ||
     text.includes("noisy") ||
     text.includes("violation") ||
-    text.includes("complaint")
+    text.includes("complaint") ||
+    text.includes("warning")
   ) {
-    const { rooms } = await getNoisyRooms({ roomId: "All" });
+    const wantsViolationOnly = text.includes("violation") || text.includes("critical");
+    const wantsComplaintOnly = !wantsViolationOnly && (text.includes("complaint") || text.includes("warning"));
 
-    if (!rooms.length) {
-      return "No rooms currently have noise complaints or violations.";
+    const { rooms } = await getNoisyRooms({
+      roomId: "All",
+      mode: wantsViolationOnly ? "violation" : wantsComplaintOnly ? "complaint" : "all"
+    });
+
+    if (!rooms.length && wantsViolationOnly) {
+      const allNoise = await getNoisyRooms({ roomId: "All", mode: "all" });
+      if (allNoise.rooms.length) {
+        return `No rooms currently have noise violations. Other noise issues: ${allNoise.rooms
+          .map((room) => `${room.room_id} (${room.noise_stat}, ${Number(room.sound_peak || 0).toFixed(2)} dB)`)
+          .join(", ")}.`;
+      }
     }
 
-    return `Rooms with noise issues: ${rooms
+    if (!rooms.length) {
+      return "No rooms currently have noise complaints, warnings, or violations.";
+    }
+
+    const label = wantsViolationOnly
+      ? "Rooms with noise violations"
+      : wantsComplaintOnly
+      ? "Rooms with noise complaints or warnings"
+      : "Rooms with noise issues";
+
+    return `${label}: ${rooms
       .map(
         (room) =>
           `${room.room_id} (${room.noise_stat}, ${Number(room.sound_peak || 0).toFixed(2)} dB)`

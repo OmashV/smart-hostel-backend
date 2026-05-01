@@ -207,7 +207,7 @@ def train_anomalies_and_alerts(df):
         captured = pd.to_datetime(row["datetime"]).strftime("%Y-%m-%d %H:%M:%S")
         reason = "IsolationForest detected behavior outside the learned normal room profile"
         anomaly_docs.append({"room_id": str(row["room_id"]), "date": captured, "status": "Abnormal", "reason": reason, "avg_sound_peak": round(safe_float(row["avg_sound_peak"]), 2), "avg_current": round(safe_float(row["avg_current"]), 4), "violation_count": int(safe_float(row["violation_count"])), "anomaly_score": round(score, 4), "model_name": "IsolationForest"})
-        alert_docs.append({"room_id": str(row["room_id"]), "captured_at": captured, "evidence_at": captured, "display_at": datetime.utcnow(), "generated_at": datetime.utcnow(), "alert_type": "ML Anomaly Alert", "severity": severity, "confidence": round(score, 4), "model_name": "IsolationForest", "reason": "ML alert generated from learned multi-sensor behavior anomaly score", "source_anomaly_score": round(score, 4)})
+        alert_docs.append({"room_id": str(row["room_id"]), "captured_at": captured, "evidence_at": captured, "display_at": datetime.utcnow(), "generated_at": datetime.utcnow(), "alert_type": "ML Anomaly Alert", "severity": severity,  "model_name": "IsolationForest", "reason": "This room needs checking because the system detected unusual activity.", "source_anomaly_score": round(score, 4)})
     if anomaly_docs:
         db.warden_anomalies.insert_many(anomaly_docs)
     if alert_docs:
