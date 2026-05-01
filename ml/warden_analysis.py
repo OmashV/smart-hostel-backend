@@ -237,11 +237,10 @@ def train_anomalies_and_alerts(df):
     df["anomaly_flag"] = flags
     df["anomaly_score"] = norm
     anomalies = df[df["anomaly_flag"] == -1].copy()
-    cutoff = float(anomalies["anomaly_score"].quantile(0.75)) if not anomalies.empty else 1.0
     anomaly_docs, alert_docs = [], []
     for _, row in anomalies.iterrows():
         score = safe_float(row["anomaly_score"])
-        severity = "Critical" if score >= cutoff else "Warning"
+        severity = "Critical"
         captured = pd.to_datetime(row["datetime"]).strftime("%Y-%m-%d %H:%M:%S")
         reason = "IsolationForest detected behavior outside the learned normal room profile"
         anomaly_docs.append({"room_id": str(row["room_id"]), "date": captured, "status": "Abnormal", "reason": reason, "avg_sound_peak": round(safe_float(row["avg_sound_peak"]), 2), "avg_current": round(safe_float(row["avg_current"]), 4), "violation_count": int(safe_float(row["violation_count"])), "anomaly_score": round(score, 4), "model_name": "IsolationForest"})
