@@ -1,4 +1,6 @@
 const groq = require("./groqClient");
+
+const GROQ_MODEL = "llama-3.3-70b-versatile";
 const {
   getSecuritySummary,
   getSecuritySuspiciousRooms,
@@ -165,7 +167,7 @@ async function generateSecurityReply({ message, dashboardState, history = [] }) 
       content: systemPrompt()
     },
     // Inject last 6 messages of history (3 exchanges) for follow-up support
-    ...history.slice(-6).map((h) => ({
+    ...history.slice(-6).filter((h) => h.role && h.content).map((h) => ({
       role:    h.role,
       content: h.content
     })),
@@ -179,11 +181,11 @@ async function generateSecurityReply({ message, dashboardState, history = [] }) 
   let firstResponse;
   try {
     firstResponse = await groq.chat.completions.create({
-      model:       "llama-3.3-70b-versatile",
+      model:       GROQ_MODEL,
       temperature: 0.1,
       messages,
       tools:       TOOLS,
-      tool_choice: "auto"
+      tool_choice: "required"
     });
   } catch (error) {
     console.error("Security chat first completion error:", error);
@@ -269,8 +271,8 @@ async function generateSecurityReply({ message, dashboardState, history = [] }) 
   let finalResponse;
   try {
     finalResponse = await groq.chat.completions.create({
-      model:       "llama-3.3-70b-versatile",
-      temperature: 0.2,
+      model:       GROQ_MODEL,
+      temperature: 0.1,
       messages
     });
   } catch (error) {
