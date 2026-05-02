@@ -1215,14 +1215,58 @@ async function getWardenHistory(req, res) {
 
     let combinedRoomRows = [...hourlyRows];
 
-    if (!combinedRoomRows.length) {
-      combinedRoomRows = await SensorReading.aggregate([
-        { $match: { ...roomFilter, captured_at: { $gte: new Date(`${startDate}T00:00:00+05:30`), $lte: new Date(`${endDate}T23:59:59+05:30`) } } },
-        { $group: { _id: { date: { $dateToString: { format: "%Y-%m-%d", date: "$captured_at", timezone: TIMEZONE } }, room_id: "$room_id" }, occupied_count: { $sum: { $cond: [{ $eq: ["$occupancy_stat", "Occupied"] }, 1, 0] } }, empty_count: { $sum: { $cond: [{ $eq: ["$occupancy_stat", "Empty"] }, 1, 0] } }, sleeping_count: { $sum: { $cond: [{ $eq: ["$occupancy_stat", "Sleeping"] }, 1, 0] } }, warning_count: { $sum: { $cond: [{ $eq: ["$noise_stat", "Warning"] }, 1, 0] } }, violation_count: { $sum: { $cond: [{ $eq: ["$noise_stat", "Violation"] }, 1, 0] } }, door_open_count: { $sum: { $cond: [{ $eq: ["$door_status", "Open"] }, 1, 0] } }, avg_sound_peak: { $avg: "$sound_peak" }, avg_current: { $avg: "$current_amp" }, inspection_count: { $sum: { $cond: ["$needs_inspection", 1, 0] } } } },
-        { $project: { _id: 0, date: "$_id.date", room_id: "$_id.room_id", occupied_count: 1, empty_count: 1, sleeping_count: 1, warning_count: 1, violation_count: 1, door_open_count: 1, inspection_count: 1, avg_sound_peak: { $round: ["$avg_sound_peak", 2] }, avg_current: { $round: ["$avg_current", 4] }, source: "sensorreadings" } }
-      ]);
-    }
+const dailyRows = await DailyRoomSummary.find({
+  ...roomFilter,
+  date: { $gte: startDate, $lte: endDate }
+})
+  .select({
+    _id: 0,
+    room_id: 1,
+    date: 1,
+    occupied_count: 1,
+    empty_count: 1,
+    sleeping_count: 1,
+    warning_count: 1,
+    violation_count: 1,
+    critical_count: 1,
+    complaint_count: 1,
+    door_open_count: 1,
+    inspection_count: 1,
+    avg_sound_peak: 1,
+    avg_current: 1,
+    total_motion_count: 1,
+    motion_count: 1
+  })
+  .lean();
 
+if (dailyRows.length) {
+  combinedRoomRows = dailyRows.map((row) => {
+    const motion = Number(row.total_motion_count || row.motion_count || 0);
+    const occupied = Number(row.occupied_count || 0) || (motion > 0 ? 1 : 0);
+    const empty = Number(row.empty_count || 0) || (motion > 0 ? 0 : 1);
+
+    return {
+      date: row.date,
+      room_id: row.room_id,
+      occupied_count: occupied,
+      empty_count: empty,
+      sleeping_count: Number(row.sleeping_count || 0),
+      warning_count: Number(row.warning_count || row.complaint_count || 0),
+      violation_count: Number(row.violation_count || row.critical_count || 0),
+      door_open_count: Number(row.door_open_count || 0),
+      inspection_count: Number(row.inspection_count || 0),
+      avg_sound_peak: Number(row.avg_sound_peak || 0),
+      avg_current: Number(row.avg_current || 0),
+      source: "daily_room_summary"
+    };
+  });
+} else if (!combinedRoomRows.length) {
+  combinedRoomRows = await SensorReading.aggregate([
+    { $match: { ...roomFilter, captured_at: { $gte: new Date(`${startDate}T00:00:00+05:30`), $lte: new Date(`${endDate}T23:59:59+05:30`) } } },
+    { $group: { _id: { date: { $dateToString: { format: "%Y-%m-%d", date: "$captured_at", timezone: TIMEZONE } }, room_id: "$room_id" }, occupied_count: { $sum: { $cond: [{ $eq: ["$occupancy_stat", "Occupied"] }, 1, 0] } }, empty_count: { $sum: { $cond: [{ $eq: ["$occupancy_stat", "Empty"] }, 1, 0] } }, sleeping_count: { $sum: { $cond: [{ $eq: ["$occupancy_stat", "Sleeping"] }, 1, 0] } }, warning_count: { $sum: { $cond: [{ $eq: ["$noise_stat", "Warning"] }, 1, 0] } }, violation_count: { $sum: { $cond: [{ $eq: ["$noise_stat", "Violation"] }, 1, 0] } }, door_open_count: { $sum: { $cond: [{ $eq: ["$door_status", "Open"] }, 1, 0] } }, avg_sound_peak: { $avg: "$sound_peak" }, avg_current: { $avg: "$current_amp" }, inspection_count: { $sum: { $cond: ["$needs_inspection", 1, 0] } } } },
+    { $project: { _id: 0, date: "$_id.date", room_id: "$_id.room_id", occupied_count: 1, empty_count: 1, sleeping_count: 1, warning_count: 1, violation_count: 1, door_open_count: 1, inspection_count: 1, avg_sound_peak: { $round: ["$avg_sound_peak", 2] }, avg_current: { $round: ["$avg_current", 4] }, source: "sensorreadings" } }
+  ]);
+}
     const byDate = new Map();
     for (const row of combinedRoomRows) {
       const key = row.date;
@@ -1265,6 +1309,7 @@ async function getWardenHistory(req, res) {
     console.error("getWardenHistory error:", error);
     res.status(500).json({ message: "Failed to load warden history" });
   }
+  
 }
 
 

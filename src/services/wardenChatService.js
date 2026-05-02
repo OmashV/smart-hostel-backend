@@ -28,233 +28,194 @@ function getRoomScope(message = "", dashboardState = {}) {
   if (explicitRoom) return explicitRoom;
 
   const text = normalizeText(message);
-  const globalWords = [
-    "all",
-    "rooms",
-    "occupied rooms",
-    "empty rooms",
-    "vacant rooms",
-    "which rooms",
-    "what rooms"
-  ];
-
-  if (globalWords.some((word) => text.includes(word))) return "All";
+  if (
+    text.includes("all rooms") ||
+    text.includes("which rooms") ||
+    text.includes("what rooms") ||
+    text.includes("occupied rooms") ||
+    text.includes("empty rooms") ||
+    text.includes("noisy rooms") ||
+    text.includes("inspection rooms")
+  ) {
+    return "All";
+  }
 
   return dashboardState?.roomId || dashboardState?.selectedFilters?.roomId || "All";
 }
 
 function listRoomIds(rooms = []) {
-  return rooms.map((room) => room.room_id).filter(Boolean).join(", ") || "none";
+  return rooms.map((r) => r.room_id).filter(Boolean).join(", ") || "none";
+}
+
+function n(value, digits = 2) {
+  return Number(value || 0).toFixed(digits);
 }
 
 function statusMatches(value, status) {
   return normalizeText(value) === normalizeText(status);
 }
 
-function latestForecastText(forecasts = []) {
-  if (!forecasts.length) return "No forecast records are available for the selected scope.";
+function describeRoom(room) {
+  return `${room.room_id}: ${room.occupancy_stat || "No Data"}, noise ${room.noise_stat || "No Data"} (${n(room.sound_peak)} dB), door ${room.door_status || "No Data"}, power ${n(room.current_amp)} A`;
+}
 
-  return forecasts
-    .slice(0, 5)
-    .map(
-      (item) =>
-        `${item.date}: occupied ${Number(item.predicted_occupied_count || 0).toFixed(
-          2
-        )}, warnings ${Number(item.predicted_warning_count || 0).toFixed(
-          2
-        )}, violations ${Number(item.predicted_violation_count || 0).toFixed(2)} (${
-          item.model_name || "forecast model"
-        })`
-    )
-    .join("; ");
+function strongestRiskRoom(rooms = []) {
+  return [...rooms].sort((a, b) => {
+    const score = (r) =>
+      Number(r.needs_inspection ? 5 : 0) +
+      Number(String(r.noise_stat || "").toLowerCase().includes("violation") ? 4 : 0) +
+      Number(String(r.door_status || "").toLowerCase().includes("open") ? 2 : 0) +
+      Number(r.sound_peak || 0) / 25 +
+      Number(r.current_amp || 0);
+    return score(b) - score(a);
+  })[0];
 }
 
 async function deterministicWardenAnswer(message = "", dashboardState = {}) {
   const text = normalizeText(message);
   const roomId = getRoomScope(message, dashboardState);
+  const explicitRoom = extractRoomId(message);
 
   if (text.includes("occupied")) {
     const { rooms } = await getLatestRoomReadings({ roomId: "All" });
-    const occupied = rooms.filter((room) => statusMatches(room.occupancy_stat, "Occupied"));
+    const occupied = rooms.filter((r) => statusMatches(r.occupancy_stat, "Occupied"));
     return `There are ${occupied.length} occupied room${occupied.length === 1 ? "" : "s"}: ${listRoomIds(occupied)}.`;
   }
 
   if (text.includes("empty") || text.includes("vacant")) {
     const { rooms } = await getLatestRoomReadings({ roomId: "All" });
-    const empty = rooms.filter((room) => statusMatches(room.occupancy_stat, "Empty"));
+    const empty = rooms.filter((r) => statusMatches(r.occupancy_stat, "Empty"));
     return `There are ${empty.length} empty room${empty.length === 1 ? "" : "s"}: ${listRoomIds(empty)}.`;
   }
 
   if (text.includes("sleeping")) {
     const { rooms } = await getLatestRoomReadings({ roomId: "All" });
-    const sleeping = rooms.filter((room) => statusMatches(room.occupancy_stat, "Sleeping"));
+    const sleeping = rooms.filter((r) => statusMatches(r.occupancy_stat, "Sleeping"));
     return `There are ${sleeping.length} sleeping room${sleeping.length === 1 ? "" : "s"}: ${listRoomIds(sleeping)}.`;
   }
 
-  if (
-    text.includes("noise level") ||
-    text.includes("sound level") ||
-    text.includes("noise in room") ||
-    text.includes("sound in room")
-  ) {
-    const explicitRoom = extractRoomId(message);
-    if (explicitRoom) {
-      const result = await getRoomNoiseLevel({ roomId: explicitRoom });
+  if (explicitRoom && (text.includes("why") || text.includes("explain") || text.includes("critical") || text.includes("problem"))) {
+    const { rooms } = await getLatestRoomReadings({ roomId: explicitRoom });
+    const room = rooms[0];
+    const { alerts } = await getActiveWardenAlerts({ roomId: explicitRoom, limit: 5 });
+    const { anomalies } = await getWardenAnomalySummary({ roomId: explicitRoom, limit: 3 });
 
-      if (!result.found) {
-        return `Room ${explicitRoom} was not found in Warden room-status data.`;
-      }
+    if (!room) return `Room ${explicitRoom} was not found.`;
 
-      return `Room ${explicitRoom} has ${result.noise_stat || "No Data"} noise status with ${Number(result.sound_peak || 0).toFixed(2)} dB.`;
-    }
+    const evidence = [];
+    if (String(room.noise_stat || "").toLowerCase().includes("violation")) evidence.push(`very loud noise (${n(room.sound_peak)} dB)`);
+    if (String(room.door_status || "").toLowerCase().includes("open")) evidence.push("door is open");
+    if (Number(room.current_amp || 0) > 0) evidence.push(`power use is ${n(room.current_amp)} A`);
+    if (room.needs_inspection) evidence.push("room is marked for inspection");
+    if (alerts.length) evidence.push(`${alerts.length} active alert record(s)`);
+    if (anomalies.length) evidence.push(`${anomalies.length} anomaly record(s)`);
+
+    return `Room ${explicitRoom} needs attention because ${evidence.join(", ") || "unusual room activity was detected"}.`;
   }
 
-  if (
-    text.includes("noise") ||
-    text.includes("noisy") ||
-    text.includes("violation") ||
-    text.includes("complaint") ||
-    text.includes("warning")
-  ) {
-    const wantsViolationOnly = text.includes("violation") || text.includes("critical");
-    const wantsComplaintOnly = !wantsViolationOnly && (text.includes("complaint") || text.includes("warning"));
+  if (explicitRoom && (text.includes("noise level") || text.includes("sound level") || text.includes("noise"))) {
+    const result = await getRoomNoiseLevel({ roomId: explicitRoom });
+    if (!result.found) return `Room ${explicitRoom} was not found.`;
+    return `Room ${explicitRoom} noise level is ${n(result.sound_peak)} dB and status is ${result.noise_stat || "No Data"}.`;
+  }
+
+  if (text.includes("noise") || text.includes("noisy") || text.includes("violation") || text.includes("complaint") || text.includes("warning")) {
+    const wantsViolation = text.includes("violation") || text.includes("critical");
+    const wantsWarning = !wantsViolation && (text.includes("complaint") || text.includes("warning"));
 
     const { rooms } = await getNoisyRooms({
       roomId: "All",
-      mode: wantsViolationOnly ? "violation" : wantsComplaintOnly ? "complaint" : "all"
+      mode: wantsViolation ? "violation" : wantsWarning ? "complaint" : "all"
     });
 
-    if (!rooms.length && wantsViolationOnly) {
-      const allNoise = await getNoisyRooms({ roomId: "All", mode: "all" });
-      if (allNoise.rooms.length) {
-        return `No rooms currently have noise violations. Other noise issues: ${allNoise.rooms
-          .map((room) => `${room.room_id} (${room.noise_stat}, ${Number(room.sound_peak || 0).toFixed(2)} dB)`)
-          .join(", ")}.`;
-      }
-    }
+    if (!rooms.length) return "No rooms currently have matching noise issues.";
 
-    if (!rooms.length) {
-      return "No rooms currently have noise complaints, warnings, or violations.";
-    }
-
-    const label = wantsViolationOnly
+    const label = wantsViolation
       ? "Rooms with noise violations"
-      : wantsComplaintOnly
+      : wantsWarning
       ? "Rooms with noise complaints or warnings"
       : "Rooms with noise issues";
 
-    return `${label}: ${rooms
-      .map(
-        (room) =>
-          `${room.room_id} (${room.noise_stat}, ${Number(room.sound_peak || 0).toFixed(2)} dB)`
-      )
-      .join(", ")}.`;
-  }
-
-  if (
-    text.includes("room status") ||
-    text.includes("status of") ||
-    text.includes("current status")
-  ) {
-    const { rooms } = await getLatestRoomReadings({ roomId });
-
-    if (!rooms.length) return `No current room-status records are available for ${roomId}.`;
-
-    return rooms
-      .map(
-        (room) =>
-          `${room.room_id}: ${room.occupancy_stat || "Unknown"}, noise ${
-            room.noise_stat || "Unknown"
-          }, door ${room.door_status || "Unknown"}, sound ${Number(room.sound_peak || 0).toFixed(2)} dB`
-      )
-      .join("; ");
-  }
-
-  if (text.includes("alert") || text.includes("critical")) {
-    const { alerts } = await getActiveWardenAlerts({ roomId, limit: 20 });
-
-    if (!alerts.length) return `There are no active ML alerts for ${roomId}.`;
-
-    const affected = [...new Set(alerts.map((item) => item.room_id).filter(Boolean))];
-
-    return `There are ${alerts.length} active ML alert${alerts.length === 1 ? "" : "s"} for ${roomId}. Affected rooms: ${affected.join(", ") || "none"}. Latest model: ${alerts[0].model_name || "IsolationForest"}.`;
-  }
-
-  if (
-    text.includes("inspection") ||
-    text.includes("cleaning") ||
-    text.includes("priority") ||
-    text.includes("action first")
-  ) {
-    const { rooms } = await getInspectionRooms({ roomId: "All" });
-
-    if (!rooms.length) return "No rooms currently need inspection or cleaning priority action.";
-
-    return `Rooms needing Warden action: ${listRoomIds(rooms)}. Priority is based on current sensor status plus ML alert evidence.`;
+    return `${label}: ${rooms.map((r) => `${r.room_id} (${r.noise_stat}, ${n(r.sound_peak)} dB)`).join(", ")}.`;
   }
 
   if (text.includes("door") || text.includes("open")) {
     const { rooms } = await getOpenDoorRooms({ roomId: "All" });
-
-    return rooms.length
-      ? `Open-door rooms: ${listRoomIds(rooms)}.`
-      : "No rooms currently have an open-door status.";
+    return rooms.length ? `Open-door rooms: ${listRoomIds(rooms)}.` : "No rooms currently have an open-door status.";
   }
 
-  if (text.includes("pattern") || text.includes("weekly") || text.includes("kmeans")) {
+  if (text.includes("inspection") || text.includes("cleaning") || text.includes("priority") || text.includes("action first")) {
+    const { rooms } = await getInspectionRooms({ roomId: "All" });
+    if (!rooms.length) return "No rooms currently need inspection or cleaning priority action.";
+    return `Rooms needing warden action: ${listRoomIds(rooms)}. Check these first because they have sensor or alert evidence.`;
+  }
+
+  if (text.includes("most risky") || text.includes("highest risk") || text.includes("worst room") || text.includes("check first")) {
+    const { rooms } = await getLatestRoomReadings({ roomId: "All" });
+    const room = strongestRiskRoom(rooms);
+    if (!room) return "No room data available.";
+    return `The room to check first is ${room.room_id}. Evidence: noise ${room.noise_stat} (${n(room.sound_peak)} dB), door ${room.door_status}, power ${n(room.current_amp)} A, inspection ${room.needs_inspection ? "needed" : "not marked"}.`;
+  }
+
+  if (text.includes("room status") || text.includes("current status") || text.includes("status of")) {
+    const { rooms } = await getLatestRoomReadings({ roomId });
+    if (!rooms.length) return `No current status records are available for ${roomId}.`;
+    return rooms.map(describeRoom).join("; ");
+  }
+
+  if (text.includes("alert") || text.includes("critical")) {
+    const { alerts } = await getActiveWardenAlerts({ roomId, limit: 100 });
+    if (!alerts.length) return `There are no active critical alerts for ${roomId}.`;
+    const affected = [...new Set(alerts.map((a) => a.room_id).filter(Boolean))];
+    return `There are ${alerts.length} critical alert${alerts.length === 1 ? "" : "s"} for ${roomId}. Affected rooms: ${affected.join(", ")}.`;
+  }
+
+  if (text.includes("pattern") || text.includes("weekly")) {
     const { patterns } = await getWeeklyPattern({ roomId });
-
-    if (!patterns.length) return `No KMeans weekly pattern records are available for ${roomId}.`;
-
-    return `Weekly KMeans patterns for ${roomId}: ${patterns
-      .map(
-        (p) =>
-          `${p.day}: ${p.usual_pattern} (cluster ${p.cluster_id}, avg noise ${Number(
-            p.avg_noise_level || 0
-          ).toFixed(2)})`
-      )
-      .join("; ")}.`;
+    if (!patterns.length) return `No weekly pattern records are available for ${roomId}.`;
+    return `Weekly room behavior for ${roomId}: ${patterns.map((p) => `${p.day}: ${p.usual_pattern}, average noise ${n(p.avg_noise_level)} dB, attention ${n(p.avg_critical_ratio)}%`).join("; ")}.`;
   }
 
-  if (text.includes("anomal") || text.includes("abnormal") || text.includes("outlier")) {
+  if (text.includes("anomal") || text.includes("abnormal") || text.includes("unusual")) {
     const { anomalies } = await getWardenAnomalySummary({ roomId, limit: 10 });
-
-    if (!anomalies.length) return `No IsolationForest anomaly records are available for ${roomId}.`;
-
-    return `IsolationForest anomalies for ${roomId}: ${anomalies
-      .map(
-        (a) =>
-          `${a.room_id || roomId} on ${a.date} score ${Number(a.anomaly_score || 0).toFixed(3)}`
-      )
-      .join("; ")}.`;
+    if (!anomalies.length) return `No unusual activity records are available for ${roomId}.`;
+    return `Unusual activity for ${roomId}: ${anomalies.map((a) => `${a.room_id || roomId} on ${a.date}: ${a.reason || "unusual behavior"}, noise ${n(a.avg_sound_peak)} dB, power ${n(a.avg_current)} A`).join("; ")}.`;
   }
 
   if (text.includes("forecast") || text.includes("predict") || text.includes("future")) {
     const { forecasts } = await getWardenForecastSummary({ roomId });
-    return latestForecastText(forecasts);
+    if (!forecasts.length) return `No forecast records are available for ${roomId}.`;
+    return `Forecast for ${roomId}: ${forecasts.slice(0, 5).map((f) => `${f.date}: predicted occupancy ${n(f.predicted_occupied_count)}, warnings ${n(f.predicted_warning_count)}, violations ${n(f.predicted_violation_count)}`).join("; ")}.`;
+  }
+
+  if (text.includes("compare")) {
+    const { rooms } = await getLatestRoomReadings({ roomId: "All" });
+    if (!rooms.length) return "No rooms available to compare.";
+    return `Room comparison: ${rooms.map((r) => `${r.room_id}: ${r.noise_stat}, ${n(r.sound_peak)} dB, door ${r.door_status}, power ${n(r.current_amp)} A`).join("; ")}.`;
   }
 
   if (text.includes("data range") || text.includes("coverage") || text.includes("valid")) {
     const range = await getWardenDataRangeTool({ roomId });
-
-    return `Data coverage for ${roomId}: ${range.total_records || 0} records, first timestamp ${
-      range.first_timestamp || "not available"
-    }, last timestamp ${range.last_timestamp || "not available"}, ${
-      range.total_days_covered || 0
-    } day(s) covered. Valid 5+ days: ${range.valid ? "yes" : "no"}.`;
+    return `Data coverage for ${roomId}: ${range.total_records || 0} records, ${range.total_days_covered || 0} day(s), from ${range.first_timestamp || "not available"} to ${range.last_timestamp || "not available"}. Valid 5+ days: ${range.valid ? "yes" : "no"}.`;
   }
 
   if (text.includes("summary") || text.includes("overview")) {
     const summary = await getWardenSummaryTool({ roomId });
-
-    return `Warden summary for ${roomId}: total rooms ${summary.total_rooms}, occupied ${summary.occupied_rooms}, empty ${summary.empty_rooms}, sleeping ${summary.sleeping_rooms}, inspection rooms ${summary.rooms_needing_inspection}, open-door rooms ${summary.open_door_rooms}, noisy rooms ${summary.noisy_rooms}, active ML alerts ${summary.active_ml_alerts}.`;
+    return `Warden summary for ${roomId}: total rooms ${summary.total_rooms}, occupied ${summary.occupied_rooms}, empty ${summary.empty_rooms}, sleeping ${summary.sleeping_rooms}, inspection rooms ${summary.rooms_needing_inspection}, open-door rooms ${summary.open_door_rooms}, noisy rooms ${summary.noisy_rooms}, active alerts ${summary.active_ml_alerts}.`;
   }
 
   return null;
 }
 
 function systemPrompt() {
-  return `You are a Smart Hostel Warden visual analytics assistant. Answer only using the provided MongoDB and ML context. Never invent room counts, room IDs, dates, or model results. Keep the answer operational and useful for Warden decisions.`;
+  return `
+You are a Smart Hostel Warden visual analytics assistant.
+Use only the provided MongoDB and ML context.
+Never invent counts, room IDs, dates, or model results.
+Answer in simple warden-friendly language.
+Support decision questions by giving evidence and action.
+Avoid technical jargon unless the user asks for it.
+`;
 }
 
 async function generateWardenReply({ message, dashboardState }) {
@@ -263,24 +224,23 @@ async function generateWardenReply({ message, dashboardState }) {
   if (directReply) {
     return {
       reply: directReply,
-      context_used: { source: "warden_real_data_tools" }
+      context_used: { source: "deterministic_warden_real_data_tools" }
     };
   }
 
   const roomId = getRoomScope(message, dashboardState);
 
-  const [summary, rooms, alerts, patterns, anomalies, forecasts, dataRange] =
+  const [summary, rooms, alerts, patterns, anomalies, forecasts, dataRange, visual] =
     await Promise.all([
       getWardenSummaryTool({ roomId }),
       getLatestRoomReadings({ roomId }),
-      getActiveWardenAlerts({ roomId, limit: 10 }),
+      getActiveWardenAlerts({ roomId, limit: 100 }),
       getWeeklyPattern({ roomId }),
       getWardenAnomalySummary({ roomId, limit: 10 }),
       getWardenForecastSummary({ roomId }),
-      getWardenDataRangeTool({ roomId })
+      getWardenDataRangeTool({ roomId }),
+      getVisualExplanationContext({ dashboardState })
     ]);
-
-  const visual = await getVisualExplanationContext({ dashboardState });
 
   const context = {
     summary,
@@ -301,7 +261,7 @@ async function generateWardenReply({ message, dashboardState }) {
         { role: "system", content: systemPrompt() },
         {
           role: "user",
-          content: `Question: ${message}\n\nWarden data context:\n${JSON.stringify(context)}`
+          content: `Question: ${message}\n\nReal dashboard context:\n${JSON.stringify(context)}`
         }
       ]
     });
@@ -309,16 +269,18 @@ async function generateWardenReply({ message, dashboardState }) {
     return {
       reply:
         response.choices?.[0]?.message?.content ||
-        "No answer was generated from the Warden context.",
+        "No answer was generated from the Warden dashboard context.",
       context_used: context
     };
   } catch (error) {
     return {
       reply:
-        "I can answer Warden questions about occupancy, empty rooms, alerts, inspections, noise, doors, weekly patterns, anomalies, forecasts, data range, and summary using dashboard data.",
+        "I can answer questions about occupied rooms, empty rooms, noise, doors, inspections, alerts, unusual activity, forecasts, weekly patterns, and which room to check first.",
       context_used: context
     };
   }
 }
 
-module.exports = { generateWardenReply };
+module.exports = {
+  generateWardenReply
+};
