@@ -2,6 +2,8 @@ const { generateOwnerReply } = require("./ownerChatService");
 const { generateStudentReply } = require("./studentChatService");
 const { generateWardenReply } = require("./wardenChatService");
 
+const { generateSecurityReply } = require("./securityChatService");
+
 async function chatByRole({ role, message, dashboardState }) {
   switch (role) {
     case "owner":
@@ -11,8 +13,14 @@ async function chatByRole({ role, message, dashboardState }) {
     case "warden":
       return generateWardenReply({ message, dashboardState });
     case "security":
+
+    case "security":
+      return generateSecurityReply({ message, dashboardState });
+
+    case "warden":
+    case "student":
       return {
-        reply: "Security chatbot is not implemented yet. Owner and Warden chatbots are currently available.",
+        reply: `${role} chatbot is not implemented yet. Owner and security chatbots are currently available.`,
         actions: []
       };
 
