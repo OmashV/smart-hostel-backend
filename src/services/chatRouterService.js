@@ -1,10 +1,16 @@
 const { generateOwnerReply } = require("./ownerChatService");
+const { generateStudentReply } = require("./studentChatService");
+
 const { generateSecurityReply } = require("./securityChatService");
 
 async function chatByRole({ role, message, dashboardState }) {
   switch (role) {
     case "owner":
       return generateOwnerReply({ message, dashboardState });
+    case "student":
+      return generateStudentReply({ message, dashboardState }); 
+    case "warden":
+    case "security":
 
     case "security":
       return generateSecurityReply({ message, dashboardState });
