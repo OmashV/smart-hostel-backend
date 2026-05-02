@@ -7,27 +7,15 @@ const DemoSecurityReading = require("../models/DemoSecurityReading");
 // ── REAL_ROOM constant — A101 uses real sensorreadings, all others use demo ──
 const REAL_ROOM = "A101";
 
+// ── Valid room IDs — used for input sanitization ─────────────────────────────
+const VALID_ROOM = /^[A-C]\d{3}$/;
+function sanitizeRoomId(roomId) {
+  return roomId && VALID_ROOM.test(roomId) ? roomId : null;
+}
+
 // ── Source picker — returns the right model for a given roomId ───────────────
 function pickSource(roomId) {
   return roomId === REAL_ROOM ? SensorReading : DemoSecurityReading;
-}
-
-async function aggregateBothSources(pipeline) {
-  console.log("aggregateBothSources called");
-  console.log("SensorReading:", !!SensorReading);
-  console.log("DemoSecurityReading:", !!DemoSecurityReading);
-
-  try {
-    const [real, demo] = await Promise.all([
-      SensorReading.aggregate(pipeline),
-      DemoSecurityReading.aggregate(pipeline)
-    ]);
-    console.log("real count:", real.length, "demo count:", demo.length);
-    return [...real, ...demo];
-  } catch (err) {
-    console.error("aggregateBothSources error:", err.message);
-    throw err;
-  }
 }
 
 // ── Query both collections and merge results ─────────────────────────────────
@@ -40,15 +28,18 @@ async function aggregateBothSources(pipeline) {
 }
 
 async function findBothSources(query, options = {}) {
+  // Oversample each source so merging and re-sorting doesn't drop records
+  // from one source when the other dominates the top N by timestamp.
+  const oversample = options.limit ? options.limit * 2 : 0;
   const [real, demo] = await Promise.all([
     SensorReading.find(query)
       .sort(options.sort || {})
-      .limit(options.limit || 0)
+      .limit(oversample)
       .select(options.select || "")
       .lean(),
     DemoSecurityReading.find(query)
       .sort(options.sort || {})
-      .limit(options.limit || 0)
+      .limit(oversample)
       .select(options.select || "")
       .lean()
   ]);
@@ -75,6 +66,7 @@ function mergeHourlyAggregates(items, valueField, countField = "sample_count") {
 
 // ── getSecuritySummary ────────────────────────────────────────────────────────
 async function getSecuritySummary({ roomId } = {}) {
+  roomId = sanitizeRoomId(roomId);
   const pipeline = [];
   if (roomId) pipeline.push({ $match: { room_id: roomId } });
 
@@ -97,7 +89,12 @@ async function getSecuritySummary({ roomId } = {}) {
   };
 
   for (const room of latestPerRoom) {
-    const isAfterHours = room.hour >= 23 || room.hour <= 5;
+    const capturedHour = Number(
+      new Intl.DateTimeFormat("en-US", {
+        timeZone: "Asia/Colombo", hour: "numeric", hour12: false
+      }).format(new Date(room.captured_at))
+    );
+    const isAfterHours = capturedHour >= 23 || capturedHour <= 5;
     const suspicious   =
       (room.door_status === "Open" && room.door_stable_ms > 300000) ||
       (room.motion_count > 0 && isAfterHours);
@@ -123,6 +120,7 @@ async function getSecuritySummary({ roomId } = {}) {
 
 // ── getSecuritySuspiciousRooms ────────────────────────────────────────────────
 async function getSecuritySuspiciousRooms({ roomId } = {}) {
+  roomId = sanitizeRoomId(roomId);
   const pipeline = [];
   if (roomId) pipeline.push({ $match: { room_id: roomId } });
 
@@ -175,6 +173,7 @@ async function getSecuritySuspiciousRooms({ roomId } = {}) {
 // FIX: replaced getSecuritySource(roomId).model / roomFilter pattern
 //      with direct pickSource() call which returns the correct model
 async function getSecurityDoorEvents({ roomId, limit = 50 } = {}) {
+  roomId = sanitizeRoomId(roomId);
   const query        = { door_status: "Open" };
   if (roomId) query.room_id = roomId;
 
@@ -206,6 +205,7 @@ async function getSecurityDoorEvents({ roomId, limit = 50 } = {}) {
 // ── getSecurityTrend ──────────────────────────────────────────────────────────
 // FIX: uses mergeHourlyAggregates consistently for both actual and historical
 async function getSecurityTrend({ roomId } = {}) {
+  roomId = sanitizeRoomId(roomId);
   const today = new Date().toLocaleDateString("en-CA", {
     timeZone: "Asia/Colombo"
   });
@@ -391,6 +391,7 @@ async function getSecurityTrend({ roomId } = {}) {
 
 // ── getSecurityAnomalies ──────────────────────────────────────────────────────
 async function getSecurityAnomalies({ roomId, limit = 50 } = {}) {
+  roomId = sanitizeRoomId(roomId);
   const anomalyQuery = { model_name: "isolation_forest" };
   if (roomId) anomalyQuery.room_id = roomId;
 
@@ -447,28 +448,44 @@ async function getSecurityAnomalies({ roomId, limit = 50 } = {}) {
 }
 
 // ── getSecurityPatterns ───────────────────────────────────────────────────────
-// FIX: added .limit(100) to prevent unbounded collection scan
+// Returns one aggregated summary per room (most recent record + profile counts)
+// rather than raw rows — keeps LLM context small.
 async function getSecurityPatterns({ roomId } = {}) {
-  const query = {};
-  if (roomId) query.room_id = roomId;
+  roomId = sanitizeRoomId(roomId);
+  const matchStage = roomId ? { $match: { room_id: roomId } } : null;
 
-  const items = await SecurityPattern.find(query)
-    .sort({ captured_at: -1 })    // most recent first — more useful for the LLM
-    .limit(100)                    // FIX: was unbounded
-    .lean();
+  const pipeline = [
+    ...(matchStage ? [matchStage] : []),
+    { $sort: { captured_at: -1 } },
+    {
+      $group: {
+        _id:              "$room_id",
+        latest_at:        { $first: "$captured_at" },
+        behavior_profile: { $first: "$behavior_profile" },
+        pattern_name:     { $first: "$pattern_name" },
+        cluster_label:    { $first: "$cluster_label" },
+        model_name:       { $first: "$model_name" },
+        avg_door_min:     { $avg: "$door_stable_min" },
+        total_records:    { $sum: 1 },
+        after_hours_count: { $sum: { $cond: ["$is_after_hours", 1, 0] } }
+      }
+    },
+    { $sort: { _id: 1 } }
+  ];
+
+  const items = await SecurityPattern.aggregate(pipeline);
 
   return {
     patterns: items.map((item) => ({
-      room_id:          item.room_id,
-      captured_at:      item.captured_at,
-      behavior_profile: item.behavior_profile,
-      cluster_label:    item.cluster_label,
-      door_stable_min:  item.door_stable_min,
-      hour:             item.hour,
-      is_after_hours:   item.is_after_hours,
-      model_name:       item.model_name,
-      motion_count:     item.motion_count,
-      pattern_name:     item.pattern_name
+      room_id:           item._id,
+      latest_at:         item.latest_at,
+      behavior_profile:  item.behavior_profile,
+      pattern_name:      item.pattern_name,
+      cluster_label:     item.cluster_label,
+      model_name:        item.model_name,
+      avg_door_min:      item.avg_door_min != null ? Number(item.avg_door_min.toFixed(2)) : null,
+      total_records:     item.total_records,
+      after_hours_count: item.after_hours_count
     }))
   };
 }
