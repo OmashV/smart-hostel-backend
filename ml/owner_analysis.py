@@ -120,10 +120,9 @@ for room_id in rooms:
 
 print("Forecast docs processed:", len(forecast_docs))
 
-# ---------------------------
+
 # 2. ANOMALY DETECTION
-# Only energy/current-based anomalies
-# ---------------------------
+
 anomaly_features = df[
     [
         "total_energy_kwh",
@@ -226,10 +225,10 @@ if len(anomaly_features) >= 5:
 else:
     print("Not enough rows for anomaly detection")
 
-# ---------------------------
+
 # 3. UNSUPERVISED PATTERN DISCOVERY
-# Cluster day behavior, then interpret weekdays/weekends
-# ---------------------------
+
+
 pattern_features = df[
     [
         "total_energy_kwh",
